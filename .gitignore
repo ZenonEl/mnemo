@@ -1,0 +1,43 @@
+# --- secrets / credentials ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.env
+secrets/
+
+# --- private data stores (RAW ingests live outside VCS by default) ---
+/store/
+/data/
+/exports/
+*.raw
+# encrypted sync bundles are the ONLY data allowed in git (see docs/components/chat-sync.md)
+!*.age
+!*.gpg
+
+# --- vector index / caches ---
+*.sqlite
+*.duckdb
+index/
+.cache/
+embeddings/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- node ---
+node_modules/
+dist/
+*.log
+
+# --- os / editor ---
+.DS_Store
+.idea/
+.vscode/

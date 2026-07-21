@@ -1,0 +1,41 @@
+# Component: chat-export
+
+**Статус:** 🧪 прототип обкатан вживую.
+
+## Что делает
+Забирает переписку (Telegram и т.п.) вместе с вложениями и скринами и
+раскладывает по схеме **RAW + summaries + index**.
+
+## Обкатанная раскладка (референс)
+```
+raw/
+├── messages/    YYYY-MM-DD_<author>.md   # сырой текст диалога verbatim
+├── attachments/
+│   ├── <оригиналы docx/xlsx/md>
+│   └── _extracted-text/                  # текст, вытащенный из docx (docx=zip)
+└── screenshots/
+    ├── README.md
+    └── from-docx/<doc>/imageN.png        # картинки, вшитые в документы
+summaries/
+├── <дата>_chat-summary.md                # пересказ переписки
+└── attachments-summary.md                # пересказ вложений (решения/acceptance)
+INDEX.md                                  # хронология, участники, ветки, хвосты
+```
+
+## Правила
+- **RAW дословно, не редактировать.** Пересказы — отдельно.
+- Из docx тянуть и текст, и вшитые картинки (docx — это zip: `word/document.xml`
+  + `word/media/`). Черновик скрипта извлечения уже есть.
+- Скрины — оригинал PNG, без пересжатия. Если бинарник недоступен — заглушка +
+  TODO + текстовая расшифровка.
+- Именование: `YYYY-MM-DD_<автор>` — сортируется и фильтруется.
+
+## Автоматизация (Phase 1)
+- Парсер экспорта TG (JSON/HTML) → `raw/messages/` + `raw/attachments/`.
+- Извлечение docx/xlsx → `_extracted-text/` + `from-docx/`.
+- Генератор `summaries/` (LLM-пересказ) + `INDEX.md`.
+- CLI: `mnemo ingest <export>`.
+
+## Открытые вопросы
+- Форматы экспорта TG (Desktop JSON vs HTML) — какой брать за основной.
+- Инкремент: как не переэкспортировать всё при новом дампе.
