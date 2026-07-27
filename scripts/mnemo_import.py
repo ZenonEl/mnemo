@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import parsers  # noqa: E402
 from mnemo_core import (  # noqa: E402
-    RAW_ZONES, MnemoError, find_export, imported_keys, load_manifest,
+    RAW_ZONES, MnemoError, claim_path, find_export, imported_keys, load_manifest,
     message_filename, new_item, next_id, save_manifest, sha256_file, slugify,
     today, unknown_names,
 )
@@ -129,11 +129,14 @@ def split_new(result: ParseResult, known: set[str]) -> tuple[list[Message], int]
     fresh, seen = [], set()
     duplicates = 0
     for message in result.messages:
-        key = message.key(result.source_id)
-        if key in known or key in seen:
+        keys = {message.key(result.source_id)}
+        content = message.content_key()
+        if content:
+            keys.add(content)
+        if keys & known or keys & seen:
             duplicates += 1
             continue
-        seen.add(key)
+        seen |= keys
         fresh.append(message)
     return fresh, duplicates
 
@@ -230,7 +233,7 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         if target.exists():
             # Повторный импорт приносит новый снимок источника: старый не
             # трогаем (RAW неизменен), новый различаем датой импорта.
-            target = target.with_name(f"{target.stem}_{stamp}{target.suffix}")
+            target = claim_path(target.with_name(f"{target.stem}_{stamp}{target.suffix}"))
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(result.anchor, target)
         manifest["items"].append(new_item(
@@ -247,11 +250,21 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
     # Медиа раскладывается до рендера: транскрипт ссылается на конечные пути,
     # а не на имена из чужой раскладки.
     media_paths: dict[str, str] = {}
+    claimed: set[str] = set()
     for message in fresh:
-        if message.media:
-            zone = RAW_ZONES[ZONE_BY_KIND[message.media_kind or "document"]]
-            prefix = f"{message.day}_{slugify(message.author)}"
-            media_paths[message.media] = f"{zone}/{prefix}_{Path(message.media).name}"
+        if not message.media or message.media in media_paths:
+            continue
+        zone = RAW_ZONES[ZONE_BY_KIND[message.media_kind or "document"]]
+        prefix = f"{message.day}_{slugify(message.author)}"
+        wanted = export / zone / f"{prefix}_{Path(message.media).name}"
+        # Разные файлы приходят под одинаковыми именами: у Telegram это обычное
+        # дело для фото. Резервируем путь заранее, включая ещё не записанные,
+        # иначе второй файл затрёт первый, а обе записи будут указывать на один.
+        chosen = claim_path(wanted)
+        while chosen.relative_to(export).as_posix() in claimed:
+            chosen = claim_path(chosen.with_name(f"{chosen.stem}-x{chosen.suffix}"))
+        claimed.add(chosen.relative_to(export).as_posix())
+        media_paths[message.media] = chosen.relative_to(export).as_posix()
 
     # --- дневные транскрипты ---
     for day, messages in plan["days"].items():
@@ -261,9 +274,10 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         if target.exists():
             # За этот день транскрипт уже есть. Дописывать в него нельзя —
             # RAW неизменен; новый материал становится отдельным артефактом,
-            # помеченным датой импорта.
-            target = export / RAW_ZONES["message"] / message_filename(
-                day, chat_slug, f"chat-{stamp}")
+            # помеченным датой импорта. Если и такой есть (несколько импортов
+            # за сутки) — claim_path подберёт свободное имя, а не затрёт.
+            target = claim_path(export / RAW_ZONES["message"] / message_filename(
+                day, chat_slug, f"chat-{stamp}"))
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
         manifest["items"].append(new_item(
@@ -278,8 +292,14 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         stats["days"] += 1
 
     # --- медиа ---
+    filed: set[str] = set()
     for message in fresh:
         if not message.media:
+            continue
+        # На один и тот же файл может ссылаться несколько сообщений — в выгрузке
+        # это обычное дело. Файл хранится один раз и учитывается одной записью:
+        # две записи на один путь означали бы, что материалов больше, чем есть.
+        if media_paths.get(message.media) in filed:
             continue
         kind = message.media_kind or "document"
         found = resolve_media(source, message.media)
@@ -297,6 +317,7 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
                 date=message.day, participants=[message.author],
                 raw_path=rel_path, sha256=None, status="missing",
             ))
+            filed.add(rel_path)
             stats["missing"] += 1
             continue
 
@@ -314,6 +335,7 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
             date=message.day, participants=[message.author],
             raw_path=rel_path, sha256=sha256_file(target), status="present",
         ))
+        filed.add(rel_path)
         stats[kind] += 1
 
     manifest.setdefault("imports", []).append({
@@ -321,7 +343,12 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         "source": str(source),
         "imported": stamp,
         "messages": len(fresh),
-        "keys": sorted(m.key(result.source_id) for m in fresh),
+        "keys": sorted({
+            key
+            for m in fresh
+            for key in (m.key(result.source_id), m.content_key())
+            if key
+        }),
     })
     save_manifest(export, manifest)
     return stats

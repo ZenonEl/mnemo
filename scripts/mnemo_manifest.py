@@ -333,6 +333,8 @@ def cmd_redact(args) -> int:
             item["redactions"].append(record["id"])
 
     save_manifest(export, manifest)
+    from mnemo_render import sync
+    sync(export, rehash=False)
     print(f"{record['id']}  {record['reason']}  {record['description']}")
     return 0
 
@@ -392,6 +394,19 @@ def cmd_people(args) -> int:
         if existing:
             raise MnemoError(f"роль self уже занята: {existing[0]}")
 
+    # Алиас, который уже указывает на другого человека, делает реестр
+    # бесполезным: `whois` молча вернёт первого попавшегося, и материал
+    # припишется не тому. Лучше отказать сразу.
+    proposed = [args.display, person_id]
+    proposed += [a.strip() for a in (args.aliases or "").split(",") if a.strip()]
+    for name in proposed:
+        clash = resolve_person(manifest, name)
+        if clash is not None:
+            raise MnemoError(
+                f"«{name}» уже указывает на {clash['display']} ({clash['id']}). "
+                "Выбери другой алиас или допиши его тому человеку."
+            )
+
     handles = {}
     for key in ("github", "telegram", "email"):
         value = getattr(args, key, None)
@@ -405,6 +420,8 @@ def cmd_people(args) -> int:
     )
     manifest["people"].append(person)
     save_manifest(export, manifest)
+    from mnemo_render import sync
+    sync(export, rehash=False)
     print(f"{person['id']}  {person['role']}  {person['display']}")
     if person["aliases"]:
         print(f"  также: {', '.join(person['aliases'])}")

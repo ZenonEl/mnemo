@@ -18,7 +18,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.2"
+SPEC_VERSION = "1.3"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"
@@ -154,6 +154,24 @@ def sha256_file(path: Path) -> str:
 def rel(export: Path, path: Path) -> str:
     """Путь относительно корня экспорта, всегда через прямой слеш."""
     return path.resolve().relative_to(export.resolve()).as_posix()
+
+
+def claim_path(path: Path) -> Path:
+    """Свободное имя рядом с `path`, если оно занято.
+
+    RAW неизменен, поэтому запись поверх существующего файла запрещена всегда —
+    даже когда имя формируется автоматически. Наивная схема «при совпадении
+    добавить метку» ломается на третьем совпадении и молча затирает второе:
+    потеря материала, которую линтер увидит только как расхождение хеша, когда
+    данных уже нет.
+    """
+    if not path.exists():
+        return path
+    for number in range(2, 1000):
+        candidate = path.with_name(f"{path.stem}-{number}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise MnemoError(f"не смог подобрать свободное имя рядом с {path}")
 
 
 def find_export(start: Path) -> Path:
