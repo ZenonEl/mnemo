@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Линтер стандарта: правила V01–V14 из SPEC/STANDARD.md.
+"""Линтер стандарта: правила V01–V17 из SPEC/STANDARD.md §13.
 
 Детерминированный, без участия модели. Линтер, работающий «на усмотрение», —
 не линтер: он не может подтвердить, что архив цел, а именно это от него нужно.
@@ -18,13 +18,14 @@ from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    ALLOWED_TOP, ATTRIBUTIONS, CONTOURS, FIDELITIES, INDEX_NAME, MANIFEST_NAME, REQUIRED_FILES,
+    ALLOWED_TOP, ATTRIBUTIONS, CONTOURS, FIDELITIES, INDEX_NAME, MANIFEST_NAME,
+    PERSON_ROLES, REDACTION_REASONS, REQUIRED_FILES,
     SOURCES, STATUSES, MnemoError, all_tracked_paths, find_export, iter_raw_files,
     load_manifest, parse_day, rel, sha256_file, unknown_names,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from mnemo_manifest import is_git_ignored, git_root  # noqa: E402
+from mnemo_manifest import git_status, is_git_ignored  # noqa: E402
 
 # Ссылки вида [текст](путь) — только относительные и локальные.
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
@@ -178,6 +179,79 @@ def check(export: Path) -> Report:
             + " — заведи через people --add, иначе поиск по человеку неполон",
         )
 
+    # V15 — контракт изъятия (§6). Проверяется и при записи, и здесь: правку
+    # манифеста руками или баг в стороннем коде ловит только линтер.
+    seen_redactions: set[str] = set()
+    for record in manifest.get("redactions", []):
+        rid = record.get("id", "?")
+        if rid in seen_redactions:
+            report.error("V15", "дублирующийся id изъятия", rid)
+        seen_redactions.add(rid)
+        if record.get("reason") not in REDACTION_REASONS:
+            report.error("V15", f"reason={record.get('reason')!r} вне допустимых", rid)
+        if not str(record.get("description") or "").strip():
+            report.error("V15", "пустое description — непонятно, что изъято", rid)
+        if record.get("reversible") and not record.get("vault_ref"):
+            report.error(
+                "V15", "обратимое изъятие без vault_ref — оригинал негде взять", rid)
+        vault = str(record.get("vault_ref") or "")
+        if vault and (export / vault).resolve().is_relative_to(export.resolve()):
+            # §11.2: изъятое и экспорт не путешествуют вместе. Хранилище внутри
+            # архива отменяет смысл изъятия — материал уедет вместе с ним.
+            report.error(
+                "V15",
+                "vault_ref указывает ВНУТРЬ экспорта — изъятое и архив не хранятся вместе",
+                rid,
+            )
+
+    # V16 — контракт реестра людей (§4б)
+    seen_people: set[str] = set()
+    selves = [p for p in manifest.get("people", []) if p.get("role") == "self"]
+    if len(selves) > 1:
+        report.error(
+            "V16",
+            "ролей self несколько: " + ", ".join(p.get("id", "?") for p in selves)
+            + " — непонятно, кто ведёт архив",
+        )
+    claimed: dict[str, str] = {}
+    for person in manifest.get("people", []):
+        pid = person.get("id", "?")
+        if pid in seen_people:
+            report.error("V16", "дублирующийся id человека", pid)
+        seen_people.add(pid)
+        if person.get("role") not in PERSON_ROLES:
+            report.error("V16", f"role={person.get('role')!r} вне допустимых", pid)
+        if not str(person.get("display") or "").strip():
+            report.error("V16", "пустое display", pid)
+        for name in [person.get("display"), pid, *(person.get("aliases") or [])]:
+            if not name:
+                continue
+            key = str(name).strip().lower()
+            if key in claimed and claimed[key] != pid:
+                report.error(
+                    "V16",
+                    f"«{name}» заявлен и у {claimed[key]} — опознание вернёт произвольного",
+                    pid,
+                )
+            claimed[key] = pid
+
+    # V17 — на один файл ровно одна запись. Две записи на один путь означают,
+    # что материалов в архиве меньше, чем он показывает: содержимое одного
+    # было затёрто другим, а `rehash` сделал бы это расхождение невидимым.
+    owners: dict[str, str] = {}
+    for item in items:
+        path_str = item.get("raw_path")
+        if not path_str:
+            continue
+        if path_str in owners:
+            report.error(
+                "V17",
+                f"на {path_str} претендует и {owners[path_str]} — "
+                "один файл не может быть двумя материалами",
+                item["id"],
+            )
+        owners[path_str] = item["id"]
+
     # V11 — ничего лишнего в корне
     for entry in sorted(export.iterdir()):
         if entry.name.startswith("."):
@@ -186,8 +260,17 @@ def check(export: Path) -> Report:
             report.error("V11", f"файл вне разрешённых зон: {entry.name}")
 
     # V12 — данные не уедут в чужую репу
-    if git_root(export) is None:
+    state, _ = git_status(export)
+    if state == "none":
         report.warn("V12", "хост-проект не под git — исключать нечего")
+    elif state == "unknown":
+        # Незнание — не разрешение. Раньше любой сбой git засчитывался как
+        # «репозитория нет», и проверка приватности молча выключалась.
+        report.error(
+            "V12",
+            "не удалось проверить git (недоступен, dubious ownership и т.п.) — "
+            "нельзя подтвердить, что данные не уедут в репозиторий",
+        )
     elif not is_git_ignored(export):
         report.error(
             "V12",
@@ -225,6 +308,12 @@ def main() -> int:
             print(f"предупр. {entry['code']}{where}: {entry['message']}")
         if report.ok and not report.warnings:
             print(f"✅ {export.name}: стандарт соблюдён")
+        elif report.ok and args.strict:
+            # В строгом режиме предупреждение — повод для ненулевого кода, и
+            # значок обязан это отражать: раньше печаталось «✅», а возвращалась
+            # единица, то есть вывод противоречил коду выхода.
+            print(f"⚠️ {export.name}: предупреждений {len(report.warnings)} "
+                  "(строгий режим — считаются ошибками)")
         elif report.ok:
             print(f"✅ {export.name}: ошибок нет, предупреждений {len(report.warnings)}")
         else:

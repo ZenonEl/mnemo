@@ -28,7 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
     CONTOURS, FIDELITIES, INDEX_NAME, MANIFEST_NAME, PERSON_ROLES, RAW_ZONES, REDACTION_REASONS,
     SOURCES, STATUSES, MnemoError, ensure_skeleton, empty_manifest, find_export,
-    find_item, load_manifest, message_filename, new_item, new_person, new_redaction, next_id,
+    contained, find_item, load_manifest, message_filename, new_item, new_person,
+    new_redaction, next_id,
     parse_day, rel, resolve_person, save_manifest, sha256_file, slugify, today,
 )
 
@@ -39,28 +40,65 @@ EXTRACTABLE = {".docx", ".xlsx"}
 # git: экспорт не должен уехать в чужую репу
 # --------------------------------------------------------------------------
 
-def git_root(path: Path) -> Path | None:
+def _git(path: Path, *args: str) -> tuple[int, str]:
     try:
         result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            ["git", "-C", str(path), *args],
             capture_output=True, text=True, timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
+        # git недоступен как программа — это не «репозитория нет», это «мы не
+        # смогли проверить». Различие принципиально: см. git_status().
+        return 127, ""
+    return result.returncode, result.stdout.strip()
+
+
+def git_status(path: Path) -> tuple[str, Path | None]:
+    """Состояние git вокруг пути: `("repo"|"none"|"unknown", корень)`.
+
+    Раньше любой сбой `git` трактовался как «репозитория нет», и проверка
+    приватности тихо выключалась. Но сбой бывает не только от отсутствия репы:
+    `dubious ownership` на общей машине, git не в PATH, сломанные права — во
+    всех этих случаях репозиторий есть, экспорт не исключён, а инструмент
+    рапортует, что исключать нечего. Незнание должно выглядеть как незнание.
+    """
+    code, out = _git(path, "rev-parse", "--show-toplevel")
+    if code == 0 and out:
+        return "repo", Path(out)
+    if code == 127:
+        return "unknown", None
+    # Штатный ответ git «здесь не репозиторий» — единственное, что считается «none».
+    code2, _ = _git(path, "rev-parse", "--is-inside-work-tree")
+    return ("none", None) if code2 != 0 else ("unknown", None)
+
+
+def git_root(path: Path) -> Path | None:
+    state, root = git_status(path)
+    return root if state == "repo" else None
+
+
+def git_dir(path: Path) -> Path | None:
+    """Настоящий каталог `.git`.
+
+    В подмодуле и в git-worktree `.git` — это **файл** со ссылкой, а не каталог.
+    Наивное `root/".git"/"info"` там падает с NotADirectoryError, экспорт
+    остаётся неисключённым, и рабочие данные уезжают в чужой репозиторий при
+    первом же `git add -A`.
+    """
+    code, out = _git(path, "rev-parse", "--git-common-dir")
+    if code != 0 or not out:
+        code, out = _git(path, "rev-parse", "--git-dir")
+    if code != 0 or not out:
         return None
-    if result.returncode != 0:
-        return None
-    return Path(result.stdout.strip())
+    candidate = Path(out)
+    if not candidate.is_absolute():
+        candidate = (path / candidate).resolve()
+    return candidate
 
 
 def is_git_ignored(path: Path) -> bool:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(path.parent), "check-ignore", "-q", str(path)],
-            capture_output=True, timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0
+    code, _ = _git(path.parent, "check-ignore", "-q", str(path))
+    return code == 0
 
 
 def exclude_from_git(export: Path) -> str:
@@ -71,18 +109,30 @@ def exclude_from_git(export: Path) -> str:
     рабочем репозитории, и правило для личных данных не должно попадать в его
     историю и мешать остальным.
     """
-    root = git_root(export)
-    if root is None:
+    state, root = git_status(export)
+    if state == "none":
         return "хост-проект не под git — исключать нечего"
+    if state == "unknown" or root is None:
+        return ("⚠️ НЕ УДАЛОСЬ ПРОВЕРИТЬ git — исключение не прописано. "
+                "Убедись сам, что каталог не попадёт в репозиторий")
     if is_git_ignored(export):
         return "уже исключён из git"
 
-    exclude_file = root / ".git" / "info" / "exclude"
-    exclude_file.parent.mkdir(parents=True, exist_ok=True)
     try:
         rule = export.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return "экспорт вне дерева git-репозитория — исключать нечего"
+    if rule in ("", "."):
+        # Экспорт совпал с корнем репозитория: исключить репозиторий из самого
+        # себя нельзя, и правило `/./` молча ничего не делает.
+        return ("⚠️ экспорт находится в КОРНЕ git-репозитория — исключить нечего. "
+                "Перенеси его в подкаталог, иначе данные попадут в историю")
+
+    git_home = git_dir(export)
+    if git_home is None:
+        return "⚠️ не нашёл каталог .git — исключение не прописано, проверь сам"
+    exclude_file = git_home / "info" / "exclude"
+    exclude_file.parent.mkdir(parents=True, exist_ok=True)
 
     existing = exclude_file.read_text(encoding="utf-8") if exclude_file.is_file() else ""
     if f"/{rule}/" in existing or f"\n{rule}/" in existing:
@@ -92,7 +142,13 @@ def exclude_from_git(export: Path) -> str:
             handle.write("\n")
         handle.write(f"# mnemo: экспорт содержит рабочие данные, в историю не попадает\n")
         handle.write(f"/{rule}/\n")
-    return f"добавлено в {rel(root, exclude_file)}: /{rule}/"
+    # Путь к exclude показываем как есть: в worktree и подмодуле он лежит вне
+    # рабочего каталога, и вычислять относительный путь бессмысленно.
+    try:
+        shown = exclude_file.relative_to(root).as_posix()
+    except ValueError:
+        shown = str(exclude_file)
+    return f"добавлено в {shown}: /{rule}/"
 
 
 # --------------------------------------------------------------------------
@@ -208,10 +264,30 @@ def cmd_add_file(args) -> int:
         raise MnemoError(f"нет файла: {source}")
 
     name = args.name or source.name
+    if Path(name).name != name or name in (".", ".."):
+        # `--name '../../../ключ.txt'` копировал файл наружу, в хост-репозиторий,
+        # и падал уже ПОСЛЕ записи — данные оказывались вне исключённого каталога,
+        # а линтер их не видел вовсе.
+        raise MnemoError(
+            f"--name должен быть именем файла, а не путём: получено {name!r}. "
+            "Материал кладётся только внутрь зоны экспорта."
+        )
     target = export / zone / name
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() and not args.force:
-        raise MnemoError(f"{rel(export, target)} уже существует; --force чтобы заменить")
+    if target.exists():
+        # §8б.1: запись поверх существующего файла запрещена всегда. Флага
+        # «всё равно перезаписать» здесь нет намеренно: он уничтожал оригинал
+        # безвозвратно, а линтер замечал это лишь по расхождению хеша, когда
+        # данных уже не было. Нужна другая копия — дай ей другое имя.
+        raise MnemoError(
+            f"{rel(export, target)} уже существует. RAW не перезаписывается: "
+            "положи под другим именем через --name, либо убедись, что материал "
+            "уже в архиве."
+        )
+
+    # Метаданные проверяем ДО записи: иначе негодная дата оставляет на диске
+    # файл, о котором манифест не знает.
+    meta = meta_from_args(args)
 
     # copy2 сохраняет содержимое байт-в-байт и время — §3 стандарта запрещает
     # любую конвертацию и пересжатие.
@@ -222,7 +298,6 @@ def cmd_add_file(args) -> int:
         from mnemo_extract import extract
         derived = extract(export, target)["derived_paths"]
 
-    meta = meta_from_args(args)
     item = new_item(
         id=next_id(manifest),
         raw_path=rel(export, target),
@@ -251,20 +326,20 @@ def cmd_add_text(args) -> int:
     if not body.strip():
         raise MnemoError("пустой текст — нечего записывать")
 
+    meta = meta_from_args(args)
     day = parse_day(args.date) if args.date else today()
     target = export / RAW_ZONES["message"] / message_filename(day, args.author, args.label)
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() and not args.force:
+    if target.exists():
         # Автоматический суффикс дал бы `..._zenonel-2.md` — имя, которое ничего
         # не говорит. Просим метку: она попадёт в имя файла и останется полезной.
         raise MnemoError(
             f"{rel(export, target)} уже существует. За один день от одного автора "
             "может быть несколько материалов — добавь --label, например "
-            "--label handover. (--force заменит существующий файл.)"
+            "--label handover. RAW не перезаписывается (§8б.1)."
         )
     target.write_text(body if body.endswith("\n") else body + "\n", encoding="utf-8")
 
-    meta = meta_from_args(args)
     meta["date"] = day
     if args.author not in meta["participants"]:
         meta["participants"].insert(0, args.author)
@@ -297,7 +372,19 @@ def cmd_add_gap(args) -> int:
     else:
         if not args.expected_path:
             raise MnemoError("--expected-path обязателен при status=missing: куда положить, когда достанем")
+        # Путь наружу превращал бы `sync` в средство втянуть в архив
+        # произвольный файл с диска: запись перешла бы в `present`, а INDEX стал
+        # бы ссылаться за пределы экспорта.
         raw_path = args.expected_path
+        if contained(export, raw_path) is None:
+            raise MnemoError(
+                f"--expected-path выводит за пределы экспорта: {raw_path!r}. "
+                "Ожидаемый путь должен лежать внутри raw/."
+            )
+        if not raw_path.startswith("raw/"):
+            raise MnemoError(
+                f"--expected-path должен начинаться с raw/: получено {raw_path!r}"
+            )
 
     item = new_item(
         id=next_id(manifest),
@@ -316,6 +403,11 @@ def cmd_redact(args) -> int:
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
 
+    if args.vault_ref and contained(export, args.vault_ref) is not None:
+        raise MnemoError(
+            f"--vault-ref указывает внутрь экспорта: {args.vault_ref!r}. "
+            "Изъятое и архив не хранятся вместе — иначе изъятие бессмысленно."
+        )
     record = new_redaction(
         id=next_id(manifest, "redaction"),
         reason=args.reason,
@@ -349,7 +441,7 @@ def cmd_rehash(args) -> int:
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
 
-    changed = 0
+    pending = []
     for item in manifest["items"]:
         if not item.get("raw_path"):
             continue
@@ -358,12 +450,37 @@ def cmd_rehash(args) -> int:
             continue
         digest = sha256_file(path)
         if item.get("sha256") != digest:
-            item["sha256"] = digest
-            item["status"] = "present"
-            changed += 1
-            print(f"{item['id']}  хеш обновлён")
+            pending.append((item, digest))
+
+    if not pending:
+        print("расхождений нет — обновлять нечего")
+        return 0
+
+    print("расхождение хеша означает, что RAW изменился. Это либо доложенный")
+    print("оригинал, либо подмена. Обновление стирает улику, поэтому требует")
+    print("подтверждения и оставляет след в записи.\n")
+    for item, _ in pending:
+        was = "ждал файла" if item["status"] == "missing" else "БЫЛ present"
+        print(f"  {item['id']}  {item['raw_path']}  ({was})")
+
+    if not args.confirm:
+        print("\n— ничего не изменено. Повтори с --confirm, если это законная замена.")
+        return 1
+
+    if not (args.reason or "").strip():
+        raise MnemoError("--reason обязателен: чем объясняется замена RAW")
+
+    for item, digest in pending:
+        item["sha256"] = digest
+        item["status"] = "present"
+        note = (item.get("fidelity_note") or "").strip()
+        stamp = f"[{today()}] RAW заменён, хеш обновлён: {args.reason}"
+        item["fidelity_note"] = f"{note}; {stamp}" if note else stamp
+        print(f"{item['id']}  хеш обновлён, след записан")
     save_manifest(export, manifest)
-    print(f"обновлено записей: {changed}")
+    from mnemo_render import sync
+    sync(export, rehash=False)
+    print(f"обновлено записей: {len(pending)}")
     return 0
 
 
@@ -470,7 +587,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_file.add_argument("--file", required=True)
     p_file.add_argument("--name", default=None, help="имя в RAW, если отличается от исходного")
     p_file.add_argument("--extract", action="store_true", help="для docx/xlsx извлечь текст и картинки")
-    p_file.add_argument("--force", action="store_true")
     add_meta_args(p_file)
     p_file.set_defaults(func=cmd_add_file)
 
@@ -480,7 +596,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_text.add_argument("--label", default=None,
                         help="различитель в имени файла, если за день от автора не один материал")
     p_text.add_argument("--from-file", dest="from_file", default=None, help="откуда взять текст (иначе stdin)")
-    p_text.add_argument("--force", action="store_true")
     add_meta_args(p_text)
     p_text.set_defaults(func=cmd_add_text)
 
@@ -504,6 +619,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_hash = sub.add_parser("rehash", help="пересчитать хеши после легитимной замены")
     p_hash.add_argument("--export", default=".")
+    p_hash.add_argument("--confirm", action="store_true", help="подтвердить замену RAW")
+    p_hash.add_argument("--reason", default=None, help="чем объясняется замена")
     p_hash.set_defaults(func=cmd_rehash)
 
     p_people = sub.add_parser("people", help="реестр людей: кто есть кто")

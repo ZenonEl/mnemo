@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.3"
+SPEC_VERSION = "1.4"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"
@@ -174,6 +175,28 @@ def claim_path(path: Path) -> Path:
     raise MnemoError(f"не смог подобрать свободное имя рядом с {path}")
 
 
+def contained(root: Path, relative: str) -> Path | None:
+    """Путь `relative` внутри `root` — или `None`, если он выводит наружу.
+
+    Поля с именами файлов приходят из чужой выгрузки, а выгрузку присылают
+    третьи лица: это ровно тот материал, ради которого инструмент существует.
+    Абсолютный путь в таком поле молча отбрасывает базовый каталог, а цепочка
+    `../` уводит куда угодно, докуда дотягивается процесс, — и посторонний файл
+    оказывается в архиве неотличимым от настоящего вложения.
+    """
+    if not relative:
+        return None
+    candidate = Path(relative)
+    if candidate.is_absolute():
+        return None
+    resolved = (root / candidate).resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
 def find_export(start: Path) -> Path:
     """Найти корень экспорта, поднимаясь вверх от `start`.
 
@@ -242,9 +265,18 @@ def load_manifest(export: Path) -> dict:
 
 
 def save_manifest(export: Path, manifest: dict) -> None:
+    """Записать манифест атомарно: сначала во временный файл, потом подменить.
+
+    Обрыв на середине прямой записи оставил бы обрезанный JSON, а манифест —
+    единственный источник истины об архиве, и восстановить его неоткуда:
+    экспорт намеренно держится вне git, истории версий у него нет.
+    `os.replace` в пределах одной файловой системы атомарен.
+    """
     path = export / MANIFEST_NAME
     payload = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
-    path.write_text(payload, encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def next_id(manifest: dict, kind: str = "item") -> str:
@@ -470,7 +502,10 @@ def iter_raw_files(export: Path):
     if not raw_root.is_dir():
         return
     for path in sorted(raw_root.rglob("*")):
-        if path.is_file() and not path.name.startswith("."):
+        # Скрытые файлы тоже перечисляем: раньше точка в начале имени делала
+        # материал невидимым для линтера, и внутри raw/ можно было держать
+        # что угодно — включая «хранилище» изъятых персональных данных.
+        if path.is_file() and path.name != f".{MANIFEST_NAME}.tmp":
             yield path
 
 

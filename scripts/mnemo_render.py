@@ -46,7 +46,7 @@ ROLE_LABEL = {
     "self": "это я",
     "colleague": "коллега",
     "management": "начальство",
-    "client": "заказчик",
+    "client": "клиент",
     "other": "—",
 }
 

@@ -26,9 +26,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import parsers  # noqa: E402
 from mnemo_core import (  # noqa: E402
-    RAW_ZONES, MnemoError, claim_path, find_export, imported_keys, load_manifest,
-    message_filename, new_item, next_id, save_manifest, sha256_file, slugify,
-    today, unknown_names,
+    RAW_ZONES, MnemoError, claim_path, contained, find_export, imported_keys, load_manifest,
+    message_filename, new_item, next_id, parse_day, save_manifest, sha256_file,
+    slugify, today, unknown_names,
 )
 from parsers.base import Message, ParseResult  # noqa: E402
 
@@ -129,14 +129,24 @@ def split_new(result: ParseResult, known: set[str]) -> tuple[list[Message], int]
     fresh, seen = [], set()
     duplicates = 0
     for message in result.messages:
-        keys = {message.key(result.source_id)}
+        primary = message.key(result.source_id)
         content = message.content_key()
-        if content:
-            keys.add(content)
-        if keys & known or keys & seen:
+
+        # Внутри одной пачки авторитетен только основной ключ: у источника свои
+        # номера, и они различают сообщения надёжно. Ключ по содержимому здесь
+        # НЕ применяется — иначе два человека, написавшие одно и то же в одну
+        # минуту, схлопнулись бы в одного, и чужая реплика пропала бы молча.
+        if primary in seen:
             duplicates += 1
             continue
-        seen |= keys
+
+        # Против уже принятого — оба ключа: тот же текст мог прийти раньше из
+        # другого источника, где номера были иные (или их не было вовсе).
+        if primary in known or (content and content in known):
+            duplicates += 1
+            continue
+
+        seen.add(primary)
         fresh.append(message)
     return fresh, duplicates
 
@@ -144,22 +154,28 @@ def split_new(result: ParseResult, known: set[str]) -> tuple[list[Message], int]
 def build_plan(result: ParseResult, source: Path, messages: list[Message],
                duplicates: int = 0) -> dict:
     by_day: dict[str, list[Message]] = defaultdict(list)
+    undated: list[Message] = []
     for message in messages:
-        if message.date:
+        if message.date and len(message.date) >= 10:
             by_day[message.day].append(message)
+        else:
+            undated.append(message)
 
     media = [m for m in messages if m.media]
-    missing = [m for m in media if not (source / m.media).is_file()
-               and not (source.parent / m.media).is_file()]
+    escaping = [m for m in media if escapes_source(source, m.media)]
+    missing = [m for m in media
+               if m not in escaping and resolve_media(source, m.media) is None]
 
     return {
         "days": dict(sorted(by_day.items())),
+        "undated": undated,
         "messages": messages,
         "duplicates": duplicates,
         "authors": Counter(m.author for m in messages),
         "forwarded": sum(1 for m in messages if m.via),
         "media": Counter(m.media_kind for m in media),
         "media_missing": missing,
+        "media_escaping": escaping,
     }
 
 
@@ -191,6 +207,15 @@ def print_plan(parser_obj, result: ParseResult, plan: dict, source: Path,
     if plan["media_missing"]:
         print(f"\n  ⚠️ файлов не найдено на диске: {len(plan['media_missing'])} — "
               "будут заведены как хвосты (status=missing)")
+    if plan.get("undated"):
+        print(f"\n  ⛔ сообщений без даты: {len(plan['undated'])} — импорт будет "
+              "отклонён: такой материал потерялся бы молча")
+    if plan["media_escaping"]:
+        print(f"\n  ⛔ путей, ведущих ЗА ПРЕДЕЛЫ источника: {len(plan['media_escaping'])}")
+        for message in plan["media_escaping"][:5]:
+            print(f"       {message.media}")
+        print("     Такие файлы в архив не берутся: выгрузка не должна адресовать")
+        print("     ничего вне своего каталога. Будут заведены как хвосты.")
     if strangers:
         print("\n  ⚠️ нет в реестре людей: " + ", ".join(strangers))
         print("     заведи их: mnemo_manifest.py people --add --display «...» --role ...")
@@ -206,12 +231,58 @@ def print_plan(parser_obj, result: ParseResult, plan: dict, source: Path,
 # Выполнение
 # --------------------------------------------------------------------------
 
+def media_root(source: Path) -> Path:
+    """Каталог, относительно которого выгрузка адресует свои файлы."""
+    return source if source.is_dir() else source.parent
+
+
 def resolve_media(source: Path, relative: str) -> Path | None:
-    for base in (source, source.parent):
-        candidate = base / relative
-        if candidate.is_file():
-            return candidate
-    return None
+    """Найти файл вложения, **не выходя за пределы источника**.
+
+    Всё, что указывает наружу — абсолютный путь, цепочка `../`, симлинк на
+    сторону — не разрешается. Такой материал не пропадает молча: вызывающий
+    заводит на него хвост с объяснением.
+    """
+    candidate = contained(media_root(source), relative)
+    if candidate is None or not candidate.is_file():
+        return None
+    return candidate
+
+
+def escapes_source(source: Path, relative: str) -> bool:
+    """Пытается ли путь вывести за пределы источника."""
+    return contained(media_root(source), relative) is None
+
+
+def preflight(plan: dict) -> None:
+    """Проверить всё, что может отказать, ДО первой записи на диск.
+
+    Раньше файлы писались, а метаданные проверялись после: одно сообщение с
+    негодной датой роняло импорт на середине, манифест не сохранялся вовсе, и
+    на диске оставались файлы, о которых архив не знает. Дешевле отказаться,
+    не начав.
+    """
+    bad = []
+    undated = plan.get("undated") or []
+    if undated:
+        # Раньше такие сообщения молча выпадали: `build_plan` раскладывал по дням
+        # только те, у кого дата есть, а ключи записывались всем — материал не
+        # попадал ни в транскрипт, ни в хвосты, и повторный импорт его уже не брал.
+        bad.append(
+            f"сообщений без пригодной даты: {len(undated)} "
+            f"(например id={undated[0].msg_id or '?'}) — импорт таких материалов "
+            "потерял бы их молча"
+        )
+    for day, messages in plan["days"].items():
+        try:
+            parse_day(day)
+        except MnemoError as exc:
+            bad.append(f"{day}: {exc}")
+    if bad:
+        raise MnemoError(
+            "источник содержит негодные даты, импорт не начат:\n  "
+            + "\n  ".join(bad[:10])
+        )
 
 
 def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dict) -> dict:
@@ -302,14 +373,19 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         if media_paths.get(message.media) in filed:
             continue
         kind = message.media_kind or "document"
-        found = resolve_media(source, message.media)
         rel_path = media_paths[message.media]
+        outside = escapes_source(source, message.media)
+        found = None if outside else resolve_media(source, message.media)
 
         if found is None:
             manifest["items"].append(new_item(
                 id=next_id(manifest), source=SOURCE_BY_KIND[kind],
                 fidelity="placeholder", attribution=result.attribution,
                 fidelity_note=(
+                    f"путь «{message.media}» ведёт за пределы каталога выгрузки — "
+                    "файл не взят в архив: выгрузка не должна адресовать ничего "
+                    "снаружи себя"
+                    if outside else
                     f"файл {Path(message.media).name} упомянут в выгрузке, "
                     "но на диске отсутствует — возможно, не выгрузился"
                 ),
@@ -342,7 +418,7 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         "parser": parser_obj.name,
         "source": str(source),
         "imported": stamp,
-        "messages": len(fresh),
+        "messages": len(fresh),  # noqa: E262
         "keys": sorted({
             key
             for m in fresh
@@ -374,7 +450,7 @@ def trash(path: Path) -> str:
 def main() -> int:
     argp = argparse.ArgumentParser(description="Импортировать источник в экспорт mnemo")
     argp.add_argument("--export", default=".")
-    argp.add_argument("--source", required=True, help="каталог выгрузки или файл")
+    argp.add_argument("--source", help="каталог выгрузки или файл")
     argp.add_argument("--apply", action="store_true", help="выполнить (иначе только план)")
     argp.add_argument("--trash-source", action="store_true",
                       help="после успешного импорта убрать источник в корзину")
@@ -385,6 +461,9 @@ def main() -> int:
         for name, label in parsers.available():
             print(f"{name:12} {label}")
         return 0
+    if not args.source:
+        print("ошибка: нужен --source (или --list-parsers)", file=sys.stderr)
+        return 2
 
     try:
         export = find_export(Path(args.export))
@@ -422,6 +501,7 @@ def main() -> int:
             return 0
 
         print("\n--- импорт ---")
+        preflight(plan)
         stats = apply(export, source, parser_obj, result, plan)
         from mnemo_render import sync
         sync(export)
