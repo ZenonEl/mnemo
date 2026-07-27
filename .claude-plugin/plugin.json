@@ -1,0 +1,20 @@
+{
+  "name": "mnemo",
+  "description": "Единый стандарт чат-экспортов: приём переписки, документов и скринов в цитируемый архив с провенансом, проверяемый линтером",
+  "version": "0.1.0",
+  "author": {
+    "name": "ZenonEl"
+  },
+  "homepage": "https://github.com/ZenonEl/mnemo",
+  "repository": "https://github.com/ZenonEl/mnemo",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "chat-export",
+    "knowledge-base",
+    "provenance",
+    "context",
+    "archive",
+    "local-first",
+    "handover"
+  ]
+}

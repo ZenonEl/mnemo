@@ -1,48 +1,121 @@
 # mnemo
 
-**Your personal context OS.** Chats, dailies, and knowledge — woven into one searchable memory you can talk to.
+**Единый стандарт чат-экспортов — как плагин Claude Code.**
 
-> Status: 🌱 **scaffold** — spec-first. The vision and architecture are written down; implementation is staged (see [`docs/ROADMAP.md`](docs/ROADMAP.md)).
+Переписка с заказчиком, ТЗ в `.docx`, скрины, транскрипты созвонов складываются в
+архив, у которого известно происхождение каждого куска и который проверяется
+линтером, а не глазами.
+
+```
+/mnemo:init          создать экспорт или принять существующий
+/mnemo:add-text      сообщение или транскрипт → RAW
+/mnemo:add-files     документы → RAW, текст и вшитые картинки извлекаются
+/mnemo:add-screens   скриншоты → RAW, байт-в-байт
+/mnemo:verify        проверить, что архив цел и соответствует стандарту
+```
 
 ---
 
-## What it is
+## Зачем
 
-mnemo ingests the scattered context of your work — chat threads, daily logs, documents, past AI conversations — and turns it into a **single, structured, searchable memory** with a clean rule:
+Рабочий контекст разбирается руками и каждый раз чуть по-своему. Через месяц
+непонятно, что в архиве дословная цитата заказчика, а что чей-то конспект — а
+решения принимаются по обоим одинаково.
 
-- **RAW is sacred.** Every source is kept verbatim, in original format, so there is always something real to point back to.
-- **Summaries on top.** Human-readable digests and indexes for fast navigation.
-- **One brain, many doors.** A retrieval layer over everything, reachable through a Telegram bot, a CLI, or an MCP server your AI assistant can query.
+mnemo фиксирует это как формат:
 
-## Why
+- **RAW дословен и неизменен.** Каждый файл учтён с `sha256` — подмена видна.
+- **У каждого материала есть достоверность.** `verbatim`, `reconstructed`,
+  `digest`, `placeholder`. Конспект нельзя процитировать как чьи-то слова —
+  это запрещено стандартом, а не оставлено на внимательность.
+- **Пропуски видны.** Не удалось достать оригинал — заводится запись, а не тишина.
+  «Не добыт» и «утрачен» — разные вещи: первое задача, второе факт.
+- **`INDEX.md` генерируется.** Рукописный индекс молча расходится с содержимым;
+  здесь он производный от манифеста, и разойтись не может.
+- **Изъятия — часть формата.** Что удалено, почему, обратимо ли, где лежит
+  оригинал. Без этого архив нельзя показать.
+- **Данные не уезжают в git.** Каталог экспорта исключается из репозитория
+  хост-проекта до того, как в нём появится первый файл.
 
-Context lives in ten places — Telegram, GitHub issues, `.docx` files, AI chat logs — and none of them talk to each other. mnemo is the layer that remembers, so you (and your assistant) can ask *"what did we decide about X?"* and get a cited answer instead of scrolling.
+## Установка
 
-## Components
+```bash
+git clone https://github.com/ZenonEl/mnemo ~/.claude/plugins/mnemo
+```
 
-| Component | What it does | Status |
-|---|---|---|
-| **chat-export** | Capture chat threads → RAW + summaries + index | 🧪 prototyped |
-| **dailies** | Integrate per-day/per-project work logs | 📋 planned |
-| **tg-adapter** | Telegram bot: talk to the assistant, query memory, grep | 📋 planned |
-| **chat-sync** | Sync AI chat transcripts, encrypted, via git | 📋 planned |
-| **retrieval** | Vector search + skill/MCP over everything | 📋 planned |
+Зависимостей нет — скрипты работают на голой стандартной библиотеке Python 3.
 
-Detailed specs per component: [`docs/components/`](docs/components/).
+## Как это выглядит
 
-## Docs
+```
+<export>/
+├── INDEX.md                      производный: хронология, участники, хвосты
+├── MANIFEST.json                 источник истины о содержимом
+├── summaries/
+│   ├── <дата>_chat-summary.md    о чём договорились
+│   ├── attachments-summary.md    что решено в документах, на что сверяться
+│   ├── conventions.md            правила работы + кто и когда их установил
+│   ├── findings-log.md           проверенные факты и куда они донесены
+│   └── redactions.md             производный: что изъято и почему
+└── raw/
+    ├── messages/     YYYY-MM-DD_<author>[_<label>].md
+    ├── attachments/  оригиналы + _extracted-text/
+    ├── screenshots/  оригиналы + from-docx/<doc>/
+    └── voice/
+```
 
-- [`docs/VISION.md`](docs/VISION.md) — the full idea, in depth
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — components, data model, data flow
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — phased plan
+## Команды
 
-## Design principles
+| Команда | Что делает |
+|---|---|
+| `/mnemo:init` | создать экспорт или **принять существующий** без потери содержимого |
+| `/mnemo:add-text` | сообщение, заметка, транскрипт |
+| `/mnemo:add-files` | документы; из `.docx`/`.xlsx` достаётся текст и вшитые изображения |
+| `/mnemo:add-screens` | скриншоты без пересжатия |
+| `/mnemo:note` | проверенный факт в `findings-log` |
+| `/mnemo:rule` | рабочее правило в `conventions` |
+| `/mnemo:redact` | зарегистрировать изъятие |
+| `/mnemo:sync` | пересобрать производные из манифеста |
+| `/mnemo:verify` | линтер: 12 правил стандарта |
+| `/mnemo:gaps` | чего не хватает и что утрачено |
+| `/mnemo:publish` | публичный срез без рабочих данных |
 
-1. **RAW never lost** — originals stored untouched; derived data is disposable and rebuildable.
-2. **Local-first, sync-optional** — works on one machine; git sync is an add-on, encrypted.
-3. **Adapters, not lock-in** — TG / CLI / MCP are interchangeable front doors to one core.
-4. **Presentable by default** — clean structure, no secrets in the repo, ready to show.
+## Стандарт
 
-## License
+- [`SPEC/STANDARD.md`](SPEC/STANDARD.md) — раскладка, контракт `item`, правила
+- [`SPEC/PROVENANCE.md`](SPEC/PROVENANCE.md) — модель достоверности и правила цитирования
+- [`SPEC/CHANGELOG.md`](SPEC/CHANGELOG.md) — версии
 
-GPL-3.0 — see [`LICENSE`](LICENSE).
+Стандарт — источник истины. Навыки, команды и скрипты — его потребители; расхождение
+между ними и текстом стандарта считается дефектом инструмента.
+
+## Проверено на
+
+Три реальных экспорта, сделанных руками до появления стандарта, — приняты без потери
+содержимого, линтер проходит на всех: рабочая переписка с приёмкой проекта (документы
+с вшитыми скринами), доска задач из группового чата, и реконструкция удалённой
+переписки из логов сессий с четырьмя уровнями достоверности в одном файле.
+
+Приёмка нашла в стандарте два пробела, которых проектирование не заметило, — оба
+закрыты и описаны в [`SPEC/CHANGELOG.md`](SPEC/CHANGELOG.md).
+
+## Дальше
+
+[`BACKLOG.md`](BACKLOG.md) — векторный поиск, MCP-сервер, расшифровка голосовых,
+парсер Telegram Desktop, автоматическая деперсонализация. Всё это ложится поверх
+стандарта и не требует его переписывания.
+
+Общая картина, частью которой это является, — [`docs/VISION.md`](docs/VISION.md).
+
+## Лицензии
+
+Репозиторий лицензирован по частям:
+
+| Путь | Лицензия |
+|---|---|
+| `SPEC/` — текст стандарта | [CC BY-SA 4.0](SPEC/LICENSE) |
+| всё остальное — навыки, команды, скрипты | [AGPL-3.0-or-later](LICENSE) |
+
+Стандарт — текст, и вирусность нужна на его производные редакции. Код — под AGPL,
+потому что осмысленный сценарий развития (MCP-сервер поверх архива) иначе позволял бы
+поднять его как закрытый сервис.

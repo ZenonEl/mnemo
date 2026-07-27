@@ -1,0 +1,368 @@
+"""Общее ядро скриптов mnemo.
+
+Только стандартная библиотека Python 3 — никаких зависимостей. Причина в
+SPEC/STANDARD.md: экспорт должен читаться и проверяться где угодно, без установки
+окружения.
+
+Здесь живёт всё, что знает про формат манифеста. Остальные скрипты — тонкие
+обёртки над этим модулем.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import unicodedata
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any
+
+SPEC_VERSION = "1.0"
+SPEC_MAJOR = 1
+
+MANIFEST_NAME = "MANIFEST.json"
+INDEX_NAME = "INDEX.md"
+
+SOURCES = (
+    "telegram", "docx", "xlsx", "screenshot", "voice",
+    "claude-chat", "daily", "web", "other",
+)
+FIDELITIES = ("verbatim", "reconstructed", "digest", "placeholder")
+STATUSES = ("present", "missing", "unrecoverable")
+CONTOURS = ("work", "personal", "public")
+REDACTION_REASONS = ("pii", "off-topic", "leaked-internal", "client-confidential")
+
+# Зона RAW по виду материала. Ключи — то, чем оперируют команды add-*.
+RAW_ZONES = {
+    "message": "raw/messages",
+    "attachment": "raw/attachments",
+    "screenshot": "raw/screenshots",
+    "voice": "raw/voice",
+}
+
+EXTRACTED_DIR = "raw/attachments/_extracted-text"
+FROM_DOCX_DIR = "raw/screenshots/from-docx"
+
+SUMMARY_DIR = "summaries"
+REQUIRED_SUMMARIES = (
+    "summaries/attachments-summary.md",
+    "summaries/conventions.md",
+    "summaries/findings-log.md",
+    "summaries/redactions.md",
+)
+REQUIRED_FILES = (MANIFEST_NAME, INDEX_NAME) + REQUIRED_SUMMARIES
+
+# Всё, что разрешено лежать в экспорте (§2 стандарта). Проверяется правилом V11.
+ALLOWED_TOP = {MANIFEST_NAME, INDEX_NAME, "summaries", "raw"}
+
+
+class MnemoError(Exception):
+    """Ошибка формата или использования. Сообщение предназначено человеку."""
+
+
+# --------------------------------------------------------------------------
+# Слаги и имена
+# --------------------------------------------------------------------------
+
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def slugify(text: str) -> str:
+    """Человеческое имя → безопасный slug: латиница, цифры, дефисы.
+
+    Кириллица транслитерируется, а не выбрасывается: имена участников и названия
+    документов в этом проекте по большей части русские, и `2026-07-21_ivan-leontev`
+    читается, а `2026-07-21_` — нет.
+    """
+    text = text.strip().lower()
+    out = []
+    for ch in text:
+        if ch in _TRANSLIT:
+            out.append(_TRANSLIT[ch])
+        elif ch.isalnum() and ch.isascii():
+            out.append(ch)
+        elif unicodedata.category(ch).startswith("L"):
+            # прочие буквы (латиница с диакритикой и т.п.) — нормализуем
+            folded = unicodedata.normalize("NFKD", ch)
+            out.append("".join(c for c in folded if c.isascii() and c.isalnum()))
+        else:
+            out.append("-")
+    slug = "".join(out)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug or "unnamed"
+
+
+def message_filename(day: str, author: str, label: str | None = None) -> str:
+    """`YYYY-MM-DD_<author>[_<label>].md` — сортируемое и фильтруемое имя (§3).
+
+    Метка нужна, когда за один день от одного автора приходит больше одного
+    материала — на реальных данных это происходит сразу же. Без неё второй файл
+    молча затёр бы первый, а молчаливая потеря RAW — худшее, что эта система
+    может сделать.
+    """
+    base = f"{day}_{slugify(author)}"
+    if label:
+        base += f"_{slugify(label)}"
+    return f"{base}.md"
+
+
+# --------------------------------------------------------------------------
+# Даты и хеши
+# --------------------------------------------------------------------------
+
+def today() -> str:
+    return date.today().isoformat()
+
+
+def parse_day(value: str) -> str:
+    """Проверить `YYYY-MM-DD` и что дата не из будущего (правило V10)."""
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise MnemoError(f"дата должна быть в формате YYYY-MM-DD, получено: {value!r}") from exc
+    if parsed > date.today():
+        raise MnemoError(f"дата из будущего: {value}")
+    return parsed.isoformat()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+# --------------------------------------------------------------------------
+# Пути
+# --------------------------------------------------------------------------
+
+def rel(export: Path, path: Path) -> str:
+    """Путь относительно корня экспорта, всегда через прямой слеш."""
+    return path.resolve().relative_to(export.resolve()).as_posix()
+
+
+def find_export(start: Path) -> Path:
+    """Найти корень экспорта, поднимаясь вверх от `start`.
+
+    Экспорт опознаётся по наличию манифеста — не по имени каталога, потому что
+    имя у принятых экспортов может быть любым.
+    """
+    current = start.resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / MANIFEST_NAME).is_file():
+            return candidate
+    raise MnemoError(
+        f"не нашёл экспорт (нет {MANIFEST_NAME}) начиная от {start}. "
+        "Сначала /mnemo:init"
+    )
+
+
+# --------------------------------------------------------------------------
+# Манифест
+# --------------------------------------------------------------------------
+
+def empty_manifest(slug: str, title: str, project: str | None = None,
+                   contour: str = "work", participants: list[str] | None = None) -> dict:
+    if contour not in CONTOURS:
+        raise MnemoError(f"contour должен быть одним из {CONTOURS}, получено {contour!r}")
+    return {
+        "mnemo_spec": SPEC_VERSION,
+        "export": {
+            "slug": slug,
+            "title": title,
+            "created": today(),
+            "project": project,
+            "contour": contour,
+            "participants": participants or [],
+        },
+        "items": [],
+        "redactions": [],
+    }
+
+
+def load_manifest(export: Path) -> dict:
+    path = export / MANIFEST_NAME
+    if not path.is_file():
+        raise MnemoError(f"нет {MANIFEST_NAME} в {export}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise MnemoError(f"{MANIFEST_NAME} повреждён: {exc}") from exc
+
+    spec = str(data.get("mnemo_spec", "0"))
+    try:
+        major = int(spec.split(".")[0])
+    except ValueError as exc:
+        raise MnemoError(f"нечитаемая версия стандарта: {spec!r}") from exc
+    if major > SPEC_MAJOR:
+        # §12 стандарта: отказаться, а не угадывать.
+        raise MnemoError(
+            f"манифест версии {spec} новее поддерживаемой {SPEC_VERSION}. Обнови mnemo."
+        )
+    data.setdefault("items", [])
+    data.setdefault("redactions", [])
+    return data
+
+
+def save_manifest(export: Path, manifest: dict) -> None:
+    path = export / MANIFEST_NAME
+    payload = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+    path.write_text(payload, encoding="utf-8")
+
+
+def next_id(manifest: dict, kind: str = "item") -> str:
+    """Следующий свободный идентификатор: i001 / r001.
+
+    Счётчик, а не ULID — скрипты обязаны работать на голой стандартной библиотеке,
+    а сортировка нужна по `date`, не по идентификатору.
+    """
+    prefix, bucket = ("i", "items") if kind == "item" else ("r", "redactions")
+    used = 0
+    for record in manifest.get(bucket, []):
+        raw = str(record.get("id", ""))
+        if raw.startswith(prefix) and raw[1:].isdigit():
+            used = max(used, int(raw[1:]))
+    return f"{prefix}{used + 1:03d}"
+
+
+def _dedupe(values: list[str] | None) -> list[str]:
+    """Убрать повторы, сохранив порядок.
+
+    Автор сообщения добавляется в участников автоматически и часто уже есть
+    в переданном списке — под слегка другим написанием он всё равно попадёт
+    дважды, но точные дубли ловим здесь.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values or []:
+        item = str(value).strip()
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def new_item(**kwargs: Any) -> dict:
+    """Единица хранения со всеми полями контракта (§5 стандарта).
+
+    Все ключи присутствуют всегда: необязательность выражается значением `null`
+    или пустым списком. Потребителю не нужно гадать, отсутствует поле или пусто.
+    """
+    item = {
+        "id": kwargs["id"],
+        "source": kwargs["source"],
+        "origin": kwargs.get("origin") or "",
+        "fidelity": kwargs["fidelity"],
+        "fidelity_note": kwargs.get("fidelity_note"),
+        "date": kwargs["date"],
+        "imported": kwargs.get("imported") or today(),
+        "participants": _dedupe(kwargs.get("participants")),
+        "raw_path": kwargs.get("raw_path"),
+        "sha256": kwargs.get("sha256"),
+        "derived_paths": list(kwargs.get("derived_paths") or []),
+        "status": kwargs.get("status", "present"),
+        "summary_ref": kwargs.get("summary_ref"),
+        "redactions": list(kwargs.get("redactions") or []),
+        "tags": list(kwargs.get("tags") or []),
+        "project": kwargs.get("project"),
+        "contour": kwargs.get("contour", "work"),
+    }
+    validate_item(item)
+    return item
+
+
+def validate_item(item: dict) -> None:
+    """Проверки, которые обязаны выполняться в момент записи, а не только линтером."""
+    if item["source"] not in SOURCES:
+        raise MnemoError(f"source должен быть одним из {SOURCES}, получено {item['source']!r}")
+    if item["fidelity"] not in FIDELITIES:
+        raise MnemoError(f"fidelity должен быть одним из {FIDELITIES}, получено {item['fidelity']!r}")
+    if item["status"] not in STATUSES:
+        raise MnemoError(f"status должен быть одним из {STATUSES}, получено {item['status']!r}")
+    if item["contour"] not in CONTOURS:
+        raise MnemoError(f"contour должен быть одним из {CONTOURS}, получено {item['contour']!r}")
+    parse_day(item["date"])
+
+    # §4 стандарта: всё, что не дословно, обязано объяснить почему.
+    if item["fidelity"] != "verbatim" and not (item["fidelity_note"] or "").strip():
+        raise MnemoError(
+            f"{item['id']}: fidelity={item['fidelity']} требует непустой fidelity_note"
+        )
+    # §5: различие missing / unrecoverable выражается путём, а не только словом.
+    if item["status"] == "unrecoverable":
+        if item["raw_path"] is not None:
+            raise MnemoError(f"{item['id']}: при status=unrecoverable raw_path должен быть null")
+        if item["fidelity"] != "placeholder":
+            raise MnemoError(f"{item['id']}: при status=unrecoverable fidelity должен быть placeholder")
+    elif item["raw_path"] is None:
+        raise MnemoError(f"{item['id']}: raw_path обязателен при status={item['status']}")
+
+
+def new_redaction(**kwargs: Any) -> dict:
+    record = {
+        "id": kwargs["id"],
+        "reason": kwargs["reason"],
+        "description": kwargs["description"],
+        "scope": kwargs["scope"],
+        "reversible": bool(kwargs.get("reversible", False)),
+        "vault_ref": kwargs.get("vault_ref"),
+        "date": kwargs.get("date") or today(),
+    }
+    if record["reason"] not in REDACTION_REASONS:
+        raise MnemoError(
+            f"reason должен быть одним из {REDACTION_REASONS}, получено {record['reason']!r}"
+        )
+    if not record["description"].strip():
+        raise MnemoError("description обязателен: что изъято, не раскрывая изъятого")
+    if record["reversible"] and not record["vault_ref"]:
+        raise MnemoError(
+            "обратимое изъятие обязано указать vault_ref — где лежит оригинал (вне экспорта)"
+        )
+    parse_day(record["date"])
+    return record
+
+
+def find_item(manifest: dict, item_id: str) -> dict:
+    for item in manifest["items"]:
+        if item["id"] == item_id:
+            return item
+    raise MnemoError(f"нет item с id={item_id}")
+
+
+def all_tracked_paths(manifest: dict) -> set[str]:
+    """Пути, учтённые манифестом: сами материалы и их производные.
+
+    Используется правилом V03. Производные учитываются здесь, а не отдельными
+    записями: у них та же достоверность и то же происхождение, что у родителя.
+    """
+    tracked: set[str] = set()
+    for item in manifest["items"]:
+        if item.get("raw_path"):
+            tracked.add(item["raw_path"])
+        tracked.update(item.get("derived_paths") or [])
+    return tracked
+
+
+def iter_raw_files(export: Path):
+    """Все реальные файлы в raw/, кроме служебных."""
+    raw_root = export / "raw"
+    if not raw_root.is_dir():
+        return
+    for path in sorted(raw_root.rglob("*")):
+        if path.is_file() and not path.name.startswith("."):
+            yield path
+
+
+def ensure_skeleton(export: Path) -> None:
+    """Создать зоны раскладки. Пустые зоны допустимы, но каркас единообразен."""
+    for zone in RAW_ZONES.values():
+        (export / zone).mkdir(parents=True, exist_ok=True)
+    (export / SUMMARY_DIR).mkdir(parents=True, exist_ok=True)
