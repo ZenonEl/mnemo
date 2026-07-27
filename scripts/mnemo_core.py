@@ -19,7 +19,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.4"
+SPEC_VERSION = "1.5"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"
@@ -235,6 +235,7 @@ def empty_manifest(slug: str, title: str, project: str | None = None,
         "redactions": [],
         "imports": [],
         "people": [],
+        "retired": [],
     }
 
 
@@ -261,6 +262,7 @@ def load_manifest(export: Path) -> dict:
     data.setdefault("redactions", [])
     data.setdefault("imports", [])
     data.setdefault("people", [])
+    data.setdefault("retired", [])
     return data
 
 
@@ -287,8 +289,13 @@ def next_id(manifest: dict, kind: str = "item") -> str:
     """
     prefix, bucket = ("i", "items") if kind == "item" else ("r", "redactions")
     used = 0
-    for record in manifest.get(bucket, []):
-        raw = str(record.get("id", ""))
+    # Отставленные идентификаторы учитываются наравне с живыми: §5 требует, что
+    # id не переиспользуется. Ссылку на него могли записать в issue, в дейлик,
+    # в сообщение коллеге — и после переиспользования она молча показывала бы
+    # на другой материал.
+    known = [str(r.get("id", "")) for r in manifest.get(bucket, [])]
+    known += [str(r.get("id", "")) for r in manifest.get("retired", [])]
+    for raw in known:
         if raw.startswith(prefix) and raw[1:].isdigit():
             used = max(used, int(raw[1:]))
     return f"{prefix}{used + 1:03d}"

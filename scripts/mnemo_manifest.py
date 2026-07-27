@@ -7,6 +7,7 @@
 
 Подкоманды:
     init        создать скелет экспорта
+    remove      снять запись с учёта (вместо правки манифеста руками)
     add-file    положить файл в RAW и завести запись
     add-text    записать сообщение/транскрипт в raw/messages/
     add-gap     завести запись о материале, которого нет
@@ -149,6 +150,17 @@ def exclude_from_git(export: Path) -> str:
     except ValueError:
         shown = str(exclude_file)
     return f"добавлено в {shown}: /{rule}/"
+
+
+def trash_file(path: Path) -> str:
+    """Убрать файл в корзину. Безвозвратного удаления в инструменте нет."""
+    if shutil.which("trash-put") is None:
+        return "trash-cli не найден — файл оставлен на месте, убери вручную"
+    try:
+        subprocess.run(["trash-put", str(path)], check=True, capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"не удалось убрать в корзину: {exc}"
+    return "в корзине (вернуть: trash-restore)"
 
 
 # --------------------------------------------------------------------------
@@ -484,6 +496,59 @@ def cmd_rehash(args) -> int:
     return 0
 
 
+def cmd_remove(args) -> int:
+    """Снять запись с учёта.
+
+    Существует ради того, чтобы никому не приходилось править MANIFEST.json
+    руками: манифест пишется только инструментом, потому что только так правила
+    контракта проверяются в момент записи, а не постфактум линтером.
+
+    Идентификатор отправляется в `retired` и **больше не выдаётся**: ссылку на
+    него могли уже записать снаружи архива.
+    """
+    export = find_export(Path(args.export))
+    manifest = load_manifest(export)
+    item = find_item(manifest, args.id)
+
+    if not (args.reason or "").strip():
+        raise MnemoError("--reason обязателен: почему запись снимается")
+
+    path = export / item["raw_path"] if item.get("raw_path") else None
+    has_file = bool(path and path.is_file())
+
+    if has_file and not args.confirm:
+        print(f"{item['id']}  {item['raw_path']}  [{item['fidelity']}, {item['status']}]")
+        print("\nЗа записью стоит реальный файл. Снятие уберёт его из архива —")
+        print("в корзину, обратимо. Повтори с --confirm, если это то, что нужно.")
+        return 1
+
+    moved = []
+    if has_file:
+        # Материал не уничтожается: пока человек не проверил результат, файл
+        # остаётся единственной копией.
+        for candidate in [path, *[export / d for d in item.get("derived_paths") or []]]:
+            if candidate.is_file():
+                note = trash_file(candidate)
+                moved.append(f"{rel(export, candidate)} — {note}")
+
+    manifest["items"] = [i for i in manifest["items"] if i["id"] != item["id"]]
+    manifest.setdefault("retired", []).append({
+        "id": item["id"],
+        "was": item.get("raw_path"),
+        "reason": args.reason,
+        "date": today(),
+    })
+    save_manifest(export, manifest)
+    from mnemo_render import sync
+    sync(export, rehash=False)
+
+    print(f"{item['id']} снят с учёта: {args.reason}")
+    for line in moved:
+        print(f"  {line}")
+    print(f"  идентификатор {item['id']} больше не будет выдан")
+    return 0
+
+
 def cmd_people(args) -> int:
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
@@ -622,6 +687,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_hash.add_argument("--confirm", action="store_true", help="подтвердить замену RAW")
     p_hash.add_argument("--reason", default=None, help="чем объясняется замена")
     p_hash.set_defaults(func=cmd_rehash)
+
+    p_rm = sub.add_parser("remove", help="снять запись с учёта, не правя манифест руками")
+    p_rm.add_argument("--export", default=".")
+    p_rm.add_argument("--id", required=True)
+    p_rm.add_argument("--reason", required=True, help="почему запись снимается")
+    p_rm.add_argument("--confirm", action="store_true", help="подтвердить, если за записью есть файл")
+    p_rm.set_defaults(func=cmd_remove)
 
     p_people = sub.add_parser("people", help="реестр людей: кто есть кто")
     p_people.add_argument("--export", default=".")
