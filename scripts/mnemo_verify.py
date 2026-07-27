@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Линтер стандарта: правила V01–V12 из SPEC/STANDARD.md.
+"""Линтер стандарта: правила V01–V14 из SPEC/STANDARD.md.
 
 Детерминированный, без участия модели. Линтер, работающий «на усмотрение», —
 не линтер: он не может подтвердить, что архив цел, а именно это от него нужно.
@@ -18,9 +18,9 @@ from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    ALLOWED_TOP, CONTOURS, FIDELITIES, INDEX_NAME, MANIFEST_NAME, REQUIRED_FILES,
+    ALLOWED_TOP, ATTRIBUTIONS, CONTOURS, FIDELITIES, INDEX_NAME, MANIFEST_NAME, REQUIRED_FILES,
     SOURCES, STATUSES, MnemoError, all_tracked_paths, find_export, iter_raw_files,
-    load_manifest, parse_day, rel, sha256_file,
+    load_manifest, parse_day, rel, sha256_file, unknown_names,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -153,6 +153,30 @@ def check(export: Path) -> Report:
         ):
             if item.get(field) not in allowed:
                 report.error("V10", f"{field}={item.get(field)!r} вне допустимых", item["id"])
+
+    # V13 — ненадёжное авторство объявлено и объяснено
+    for item in items:
+        value = item.get("attribution", "reliable")
+        if value not in ATTRIBUTIONS:
+            report.error("V13", f"attribution={value!r} вне допустимых", item["id"])
+        elif value != "reliable" and not (item.get("fidelity_note") or "").strip():
+            report.error(
+                "V13",
+                f"attribution={value} без объяснения — непонятно, чьё авторство под вопросом",
+                item["id"],
+            )
+
+    # V14 — участники опознаны. Предупреждение, а не ошибка: реестр наполняется
+    # по мере знакомства с проектом, и пустой реестр не делает архив негодным.
+    everyone = [name for item in items for name in item.get("participants", [])]
+    strangers = unknown_names(manifest, everyone)
+    if strangers:
+        report.warn(
+            "V14",
+            "нет в реестре людей: " + ", ".join(strangers[:8])
+            + (f" и ещё {len(strangers) - 8}" if len(strangers) > 8 else "")
+            + " — заведи через people --add, иначе поиск по человеку неполон",
+        )
 
     # V11 — ничего лишнего в корне
     for entry in sorted(export.iterdir()):

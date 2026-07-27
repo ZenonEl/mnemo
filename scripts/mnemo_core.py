@@ -18,7 +18,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.0"
+SPEC_VERSION = "1.2"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"
@@ -31,6 +31,13 @@ SOURCES = (
 FIDELITIES = ("verbatim", "reconstructed", "digest", "placeholder")
 STATUSES = ("present", "missing", "unrecoverable")
 CONTOURS = ("work", "personal", "public")
+# Насколько можно доверять имени рядом с текстом. Ось, независимая от fidelity:
+# текст может быть дословным, а подпись под ним — не того человека.
+ATTRIBUTIONS = ("reliable", "forwarder-shown", "unknown")
+# Отношение человека к архиву. Описывает факт связи, а не рабочий процесс:
+# «с клиентом общаемся только через начальство» — это соглашение конкретной
+# команды, ему место в conventions.md, а не в общем стандарте.
+PERSON_ROLES = ("self", "colleague", "management", "client", "other")
 REDACTION_REASONS = ("pii", "off-topic", "leaked-internal", "client-confidential")
 
 # Зона RAW по виду материала. Ключи — то, чем оперируют команды add-*.
@@ -185,6 +192,8 @@ def empty_manifest(slug: str, title: str, project: str | None = None,
         },
         "items": [],
         "redactions": [],
+        "imports": [],
+        "people": [],
     }
 
 
@@ -209,6 +218,8 @@ def load_manifest(export: Path) -> dict:
         )
     data.setdefault("items", [])
     data.setdefault("redactions", [])
+    data.setdefault("imports", [])
+    data.setdefault("people", [])
     return data
 
 
@@ -268,6 +279,7 @@ def new_item(**kwargs: Any) -> dict:
         "raw_path": kwargs.get("raw_path"),
         "sha256": kwargs.get("sha256"),
         "derived_paths": list(kwargs.get("derived_paths") or []),
+        "attribution": kwargs.get("attribution", "reliable"),
         "status": kwargs.get("status", "present"),
         "summary_ref": kwargs.get("summary_ref"),
         "redactions": list(kwargs.get("redactions") or []),
@@ -289,12 +301,23 @@ def validate_item(item: dict) -> None:
         raise MnemoError(f"status должен быть одним из {STATUSES}, получено {item['status']!r}")
     if item["contour"] not in CONTOURS:
         raise MnemoError(f"contour должен быть одним из {CONTOURS}, получено {item['contour']!r}")
+    if item.get("attribution", "reliable") not in ATTRIBUTIONS:
+        raise MnemoError(
+            f"attribution должен быть одним из {ATTRIBUTIONS}, получено {item.get('attribution')!r}"
+        )
     parse_day(item["date"])
 
     # §4 стандарта: всё, что не дословно, обязано объяснить почему.
     if item["fidelity"] != "verbatim" and not (item["fidelity_note"] or "").strip():
         raise MnemoError(
             f"{item['id']}: fidelity={item['fidelity']} требует непустой fidelity_note"
+        )
+    # §4а: ненадёжное авторство обязано объяснить себя — иначе через месяц
+    # непонятно, чьи это слова, и пометка бесполезна.
+    if item.get("attribution", "reliable") != "reliable" and not (item["fidelity_note"] or "").strip():
+        raise MnemoError(
+            f"{item['id']}: attribution={item['attribution']} требует fidelity_note "
+            "с объяснением, чьё авторство под вопросом и почему"
         )
     # §5: различие missing / unrecoverable выражается путём, а не только словом.
     if item["status"] == "unrecoverable":
@@ -328,6 +351,78 @@ def new_redaction(**kwargs: Any) -> dict:
         )
     parse_day(record["date"])
     return record
+
+
+def new_person(**kwargs: Any) -> dict:
+    """Человек в реестре экспорта.
+
+    Один и тот же человек в разных источниках выглядит по-разному: в Telegram
+    он под отображаемым именем, в git — под логином, в разговоре — по имени.
+    Без реестра поиск «что говорил X» находит одну треть, а ассистент не знает,
+    что один из участников переписки — тот, с кем он сейчас разговаривает.
+    """
+    person = {
+        "id": kwargs["id"],
+        "display": kwargs["display"],
+        "role": kwargs.get("role", "other"),
+        "aliases": _dedupe(kwargs.get("aliases")),
+        "handles": dict(kwargs.get("handles") or {}),
+        "note": kwargs.get("note"),
+    }
+    if person["role"] not in PERSON_ROLES:
+        raise MnemoError(f"role должен быть одним из {PERSON_ROLES}, получено {person['role']!r}")
+    if not person["id"] or not person["display"]:
+        raise MnemoError("у человека обязательны id и display")
+    return person
+
+
+def _norm_name(value: str) -> str:
+    """Имя для сопоставления: без регистра, пробелов по краям и эмодзи.
+
+    Отображаемые имена в мессенджерах обрастают значками («Эрми 🤍»,
+    «Соловейко :D»), и один и тот же человек не должен раздваиваться из-за них.
+    """
+    kept = [ch for ch in value.strip().lower()
+            if ch.isalnum() or ch.isspace() or ch in "_-@."]
+    return re.sub(r"\s+", " ", "".join(kept)).strip()
+
+
+def resolve_person(manifest: dict, name: str) -> dict | None:
+    """Найти человека по отображаемому имени, алиасу или хэндлу."""
+    target = _norm_name(name)
+    if not target:
+        return None
+    for person in manifest.get("people", []):
+        candidates = [person["display"], person["id"], *person.get("aliases", [])]
+        candidates += list(person.get("handles", {}).values())
+        if any(_norm_name(str(c)) == target for c in candidates if c):
+            return person
+    return None
+
+
+def unknown_names(manifest: dict, names) -> list[str]:
+    """Имена, которых нет в реестре. Порядок сохраняется."""
+    out, seen = [], set()
+    for name in names:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if resolve_person(manifest, name) is None:
+            out.append(name)
+    return out
+
+
+def imported_keys(manifest: dict) -> set[str]:
+    """Все ключи сообщений, уже попавших в экспорт.
+
+    Основа инкрементального импорта: повторная выгрузка того же чата приносит
+    и старое, и новое, и задваивать старое нельзя. Хранится в манифесте, а не
+    рядом, потому что это такая же часть истины об экспорте, как и сами записи.
+    """
+    keys: set[str] = set()
+    for batch in manifest.get("imports", []):
+        keys.update(batch.get("keys") or [])
+    return keys
 
 
 def find_item(manifest: dict, item_id: str) -> dict:

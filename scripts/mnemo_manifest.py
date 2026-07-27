@@ -26,10 +26,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    CONTOURS, FIDELITIES, INDEX_NAME, MANIFEST_NAME, RAW_ZONES, REDACTION_REASONS,
+    CONTOURS, FIDELITIES, INDEX_NAME, MANIFEST_NAME, PERSON_ROLES, RAW_ZONES, REDACTION_REASONS,
     SOURCES, STATUSES, MnemoError, ensure_skeleton, empty_manifest, find_export,
-    find_item, load_manifest, message_filename, new_item, new_redaction, next_id,
-    parse_day, rel, save_manifest, sha256_file, slugify, today,
+    find_item, load_manifest, message_filename, new_item, new_person, new_redaction, next_id,
+    parse_day, rel, resolve_person, save_manifest, sha256_file, slugify, today,
 )
 
 EXTRACTABLE = {".docx", ".xlsx"}
@@ -365,6 +365,63 @@ def cmd_rehash(args) -> int:
     return 0
 
 
+def cmd_people(args) -> int:
+    export = find_export(Path(args.export))
+    manifest = load_manifest(export)
+
+    if not args.add:
+        if not manifest["people"]:
+            print("реестр пуст — заведи людей через people --add")
+            return 0
+        for person in manifest["people"]:
+            handles = " ".join(f"{k}:{v}" for k, v in person["handles"].items())
+            print(f"{person['id']:<14} {person['role']:<11} {person['display']}")
+            if person["aliases"]:
+                print(f"{'':<14} также: {', '.join(person['aliases'])}")
+            if handles:
+                print(f"{'':<14} {handles}")
+        return 0
+
+    person_id = args.id or slugify(args.display)
+    if any(p["id"] == person_id for p in manifest["people"]):
+        raise MnemoError(f"человек с id={person_id} уже есть; используй другой --id")
+
+    # Оператор архива в единственном числе: иначе непонятно, чьи это «мои слова».
+    if args.role == "self":
+        existing = [p["id"] for p in manifest["people"] if p["role"] == "self"]
+        if existing:
+            raise MnemoError(f"роль self уже занята: {existing[0]}")
+
+    handles = {}
+    for key in ("github", "telegram", "email"):
+        value = getattr(args, key, None)
+        if value:
+            handles[key] = value
+
+    person = new_person(
+        id=person_id, display=args.display, role=args.role,
+        aliases=[a.strip() for a in (args.aliases or "").split(",") if a.strip()],
+        handles=handles, note=args.note,
+    )
+    manifest["people"].append(person)
+    save_manifest(export, manifest)
+    print(f"{person['id']}  {person['role']}  {person['display']}")
+    if person["aliases"]:
+        print(f"  также: {', '.join(person['aliases'])}")
+    return 0
+
+
+def cmd_whois(args) -> int:
+    export = find_export(Path(args.export))
+    manifest = load_manifest(export)
+    person = resolve_person(manifest, args.name)
+    if person is None:
+        print(f"{args.name}: в реестре нет")
+        return 1
+    print(json.dumps(person, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_show(args) -> int:
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
@@ -431,6 +488,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_hash = sub.add_parser("rehash", help="пересчитать хеши после легитимной замены")
     p_hash.add_argument("--export", default=".")
     p_hash.set_defaults(func=cmd_rehash)
+
+    p_people = sub.add_parser("people", help="реестр людей: кто есть кто")
+    p_people.add_argument("--export", default=".")
+    p_people.add_argument("--add", action="store_true")
+    p_people.add_argument("--id", default=None, help="устойчивый ключ; по умолчанию из display")
+    p_people.add_argument("--display", default=None, help="как называть в отчётах")
+    p_people.add_argument("--role", choices=PERSON_ROLES, default="other")
+    p_people.add_argument("--aliases", default="", help="через запятую: как он выглядит в источниках")
+    p_people.add_argument("--github", default=None)
+    p_people.add_argument("--telegram", default=None)
+    p_people.add_argument("--email", default=None)
+    p_people.add_argument("--note", default=None)
+    p_people.set_defaults(func=cmd_people)
+
+    p_who = sub.add_parser("whois", help="кто скрывается за именем из источника")
+    p_who.add_argument("--export", default=".")
+    p_who.add_argument("name")
+    p_who.set_defaults(func=cmd_whois)
 
     p_show = sub.add_parser("show", help="показать манифест")
     p_show.add_argument("--export", default=".")

@@ -20,7 +20,8 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    INDEX_NAME, MnemoError, find_export, load_manifest, save_manifest, sha256_file,
+    INDEX_NAME, MnemoError, find_export, load_manifest, resolve_person,
+    save_manifest, sha256_file,
 )
 
 GENERATED_NOTE = (
@@ -39,6 +40,14 @@ STATUS_LABEL = {
     "present": "есть",
     "missing": "не добыт",
     "unrecoverable": "утрачен",
+}
+
+ROLE_LABEL = {
+    "self": "это я",
+    "colleague": "коллега",
+    "management": "начальство",
+    "client": "заказчик",
+    "other": "—",
 }
 
 ZONE_TITLE = {
@@ -107,6 +116,34 @@ def render_index(manifest: dict) -> str:
 
     if meta.get("participants"):
         lines += ["**Участники:** " + ", ".join(meta["participants"]), ""]
+
+    # --- кто есть кто ----------------------------------------------------
+    people = manifest.get("people", [])
+    if people:
+        lines += [
+            "## Кто есть кто",
+            "",
+            "Один человек в разных источниках выглядит по-разному. Здесь — "
+            "соответствие: по какому имени искать и кто это на самом деле.",
+            "",
+            "| Кто | Роль | Как встречается | Аккаунты |",
+            "|---|---|---|---|",
+        ]
+        for person in people:
+            aliases = ", ".join(f"`{a}`" for a in person.get("aliases", [])) or "—"
+            handles = ", ".join(f"{k}: `{v}`" for k, v in person.get("handles", {}).items()) or "—"
+            lines.append(
+                f"| **{_escape(person['display'])}** | {ROLE_LABEL.get(person['role'], person['role'])} "
+                f"| {_escape(aliases)} | {_escape(handles)} |"
+            )
+        lines.append("")
+        me = next((p for p in people if p["role"] == "self"), None)
+        if me:
+            lines += [
+                f"> Оператор архива — **{me['display']}**. Реплики за этой подписью "
+                "принадлежат тому, кто ведёт этот архив.",
+                "",
+            ]
 
     # --- достоверность ---------------------------------------------------
     by_fidelity: dict[str, int] = defaultdict(int)
