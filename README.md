@@ -95,6 +95,7 @@ git clone https://github.com/ZenonEl/mnemo ~/.claude/plugins/mnemo
 
 - [`SPEC/STANDARD.md`](SPEC/STANDARD.md) — раскладка, контракт `item`, правила (версия 1.4)
 - [`SPEC/PROVENANCE.md`](SPEC/PROVENANCE.md) — модель достоверности и правила цитирования
+- [`SPEC/CITATION.md`](SPEC/CITATION.md) — формат ссылок `ctx:<slug>#<id>`
 - [`SPEC/CHANGELOG.md`](SPEC/CHANGELOG.md) — версии
 
 Стандарт — источник истины. Навыки, команды и скрипты — его потребители; расхождение
@@ -109,6 +110,19 @@ git clone https://github.com/ZenonEl/mnemo ~/.claude/plugins/mnemo
 
 Приёмка нашла в стандарте два пробела, которых проектирование не заметило, — оба
 закрыты и описаны в [`SPEC/CHANGELOG.md`](SPEC/CHANGELOG.md).
+
+## Связка
+
+mnemo — один из трёх инструментов вокруг рабочего контекста. Связаны они
+**одной строкой** — формат ссылки `ctx:<slug>#<id>`, см.
+[`SPEC/CITATION.md`](SPEC/CITATION.md). Ни общей библиотеки, ни базы, ни
+зависимостей.
+
+| Проект | Роль |
+|---|---|
+| **mnemo** | архив материала с провенансом; факты, решения, вопросы |
+| `ephemeris` | дейлики: состояние дня и синк в GitHub issues |
+| `herald` | канал наружу: отправка готового материала людям |
 
 ## Дальше
 
