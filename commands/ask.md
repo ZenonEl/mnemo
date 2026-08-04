@@ -14,7 +14,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/mnemo_manifest.py ask --export <dir> \
 
 **Отметить, что спросили:**
 ```
-... ask --export <dir> --id qNNN --raised-to "<кому>" --where "дейлик org#110"
+... ask --export <dir> --id qNNN --raised-to "<кому>" --where "дейлик <репо>#110"
 ```
 
 **Закрыть:**

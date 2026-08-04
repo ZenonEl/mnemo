@@ -44,7 +44,7 @@ description: "Use when capturing work context into a durable, citable archive �
 **1. Завести архив** — `/mnemo:init`
 
 ```
-mnemo_manifest.py init --dir _chat-export --slug priyomka --title "Приёмка — приёмка"
+mnemo_manifest.py init --dir _chat-export --slug priyomka --title "Приёмка проекта"
 ```
 
 Создаёт раскладку, исключает каталог из git и дописывает в `CLAUDE.md` проекта
@@ -64,8 +64,8 @@ mnemo_import.py --export _chat-export --source ~/Downloads/ChatExport_2026-07-21
 **3. Сказать, кто есть кто** — `/mnemo:people`
 
 ```
-mnemo_manifest.py people --export _chat-export --add --display "Пётр" \
-  --role client --aliases "Пётр Б.,petr-ivanov" --telegram petr-ivanov_b
+mnemo_manifest.py people --export _chat-export --add --display "Пётр Иванов" \
+  --role client --aliases "Пётр,petr" --telegram petr_ivanov
 ```
 
 Без этого шага «что говорил заказчик» находит треть, а `--wanted-by` в
