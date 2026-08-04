@@ -379,9 +379,17 @@ def cmd_init(args) -> int:
     print(f"  slug: {manifest['export']['slug']}")
     print(f"  git:  {git_note}")
     print(f"  CLAUDE.md: {claude_note}")
-    if "прописан в CLAUDE.md" in claude_note and not is_git_ignored(export.parent / "CLAUDE.md"):
+    if ("прописан в CLAUDE.md" in claude_note
+            and git_status(export.parent)[0] == "repo"
+            and not is_git_ignored(export.parent / "CLAUDE.md")):
         # CLAUDE.md — обычный файл проекта и попадает в коммит. В нём теперь
         # стоит имя каталога экспорта, а оно часто совпадает с именем клиента.
+        #
+        # Проверка на репозиторий обязательна: `check-ignore` вне git отвечает
+        # «не игнорируется», и предупреждение об утечке в историю печаталось
+        # там, где истории нет вовсе — строкой ниже сообщения «хост-проект не
+        # под git». Предупреждение, которое противоречит соседней строке, учит
+        # не читать предупреждения.
         print("             ⚠️ CLAUDE.md отслеживается git — имя каталога уедет "
               "в историю репозитория. Проверь перед коммитом")
     if export.name != DEFAULT_EXPORT_DIR:

@@ -33,6 +33,110 @@ description: "Use when capturing work context into a durable, citable archive �
 Не пиши `MANIFEST.json` и `INDEX.md` руками. Первый пишется скриптами, второй
 генерируется. Ручная правка `INDEX.md` теряется при следующем `sync`.
 
+## Сквозной пример: от нуля до отчёта
+
+Один сюжет целиком. Разделы ниже объясняют каждый шаг подробно — здесь важен
+**порядок** и то, что из чего следует.
+
+**Дано:** передают проект. Есть выгрузка рабочего чата, ТЗ в `.docx`, и через
+неделю у тебя спросят, всё ли сделано, как хотел заказчик.
+
+**1. Завести архив** — `/mnemo:init`
+
+```
+mnemo_manifest.py init --dir _chat-export --slug priyomka --title "Приёмка — приёмка"
+```
+
+Создаёт раскладку, исключает каталог из git и дописывает в `CLAUDE.md` проекта
+блок про архив — чтобы следующая сессия узнала о нём на старте, а не искала.
+`--slug` входит в каждую ссылку `ctx:priyomka#i004` и потом не меняется.
+
+**2. Внести выгрузку** — `/mnemo:import`
+
+```
+mnemo_import.py --export _chat-export --source ~/Downloads/ChatExport_2026-07-21
+mnemo_import.py --export _chat-export --source ~/Downloads/ChatExport_2026-07-21 --apply
+```
+
+Без `--apply` — только план. Формат опознаёт реестр парсеров; вложения приходят
+вместе с сообщениями. Импорт сам скажет, кого из участников нет в реестре людей.
+
+**3. Сказать, кто есть кто** — `/mnemo:people`
+
+```
+mnemo_manifest.py people --export _chat-export --add --display "Пётр" \
+  --role client --aliases "Пётр Б.,petr-ivanov" --telegram petr-ivanov_b
+```
+
+Без этого шага «что говорил заказчик» находит треть, а `--wanted-by` в
+требованиях ссылаться не на кого.
+
+**4. Документ, пришедший отдельно** — `/mnemo:add-files`
+
+```
+mnemo_manifest.py add-file --export _chat-export --kind attachment \
+  --file ~/Downloads/ТЗ.docx --source docx --fidelity verbatim --extract
+```
+
+`--extract` достаёт текст и вшитые картинки — иначе содержимое `.docx` в архиве
+есть, а найти его нельзя.
+
+**5. Снять с переписки то, ради чего всё делается** — `/mnemo:req`, `/mnemo:ask`
+
+```
+mnemo_manifest.py req --export _chat-export --quote "Выгрузка нужна за весь июль" \
+  --wanted-by petr-ivanov --based-on "ctx:priyomka#i012" --blocking "без неё не считается отчёт"
+
+mnemo_manifest.py ask --export _chat-export --text "Кто согласует тариф?" \
+  --impact "от ответа зависит расчёт" --asked-of petr-ivanov
+```
+
+Дословно и сразу. Пересказ задним числом теряет формулировку, а спор всегда идёт
+о формулировке. Когда вопрос ушёл человеку — отметь, иначе спросишь второй раз:
+
+```
+mnemo_manifest.py ask --export _chat-export --id q001 --raised-to petr-ivanov \
+  --where "чат 04.08"
+```
+
+**6. Разложить текстовое по природе** — `/mnemo:rule`, `/mnemo:note`
+
+Правило («с заказчиком общаемся только через начальство») дописывается в
+`summaries/conventions.md` с источником. Проверенный факт («регрессия прогнана,
+9 падений одинаковые») — в `summaries/findings-log.md` со статусом. Пересказ
+переписки — в `<дата>_chat-summary.md`. Три разных файла, и путать их нельзя.
+
+**7. Изъять чужое** — `/mnemo:redact`
+
+```
+mnemo_manifest.py redact --export _chat-export --reason pii \
+  --description "паспортные данные директора" --scope "сообщение от 12.07" --items i031
+```
+
+Описание говорит, **что** изъято, не раскрывая изъятого.
+
+**8. Пересобрать и проверить** — `/mnemo:sync`, `/mnemo:verify`
+
+```
+mnemo_render.py --export _chat-export
+mnemo_verify.py --export _chat-export
+```
+
+Обязательно после каждой мутации. Результат линтера показывай человеку.
+
+**9. Ответить на вопрос, ради которого всё затевалось** — `/mnemo:audit`
+
+```
+mnemo_audit.py --export _chat-export
+```
+
+Блокирующее сверху, возраст блокировки, `[НЕ СПРАШИВАЛИ]` у того, что ты только
+записал, но никому не задал, и отдельно — заявленное против подтверждённого.
+
+**Что чаще всего ломается на этом пути:** пропущенный шаг 3 (потом не связать
+слова с людьми), `done` без `--evidence` (это мнение, а не отчёт) и правка
+`MANIFEST.json` руками вместо команды.
+
 ## Скрипты
 
 `${CLAUDE_PLUGIN_ROOT}/scripts/` — только стандартная библиотека Python 3, ничего
