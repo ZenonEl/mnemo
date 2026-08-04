@@ -642,10 +642,115 @@ def cmd_rehash(args) -> int:
     return 0
 
 
+def read_batch(path: Path) -> list[tuple[str, list[str]]]:
+    """Список записей из файла: по одной на строку.
+
+    Двадцать требований из одного ТЗ — это двадцать вызовов с одинаковыми
+    хвостами, и на десятом начинаешь срезать углы. Срезанный угол здесь — это
+    потерянная дословная формулировка, а спор всегда идёт о формулировке.
+
+    Формат намеренно бедный: строка — это текст записи. Общие поля задаются
+    флагами один раз. Необязательный хвост после `::` — ссылки `based_on` через
+    запятую, потому что каждое требование обычно указывает на своё сообщение.
+    Пустые строки и `#` пропускаются.
+    """
+    if not path.is_file():
+        raise MnemoError(f"нет файла {path}")
+    out: list[tuple[str, list[str]]] = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        text = line.strip().lstrip("-*").strip()
+        if not text or text.startswith("#"):
+            continue
+        refs: list[str] = []
+        if "::" in text:
+            text, tail = text.split("::", 1)
+            text = text.strip()
+            refs = [r.strip() for r in tail.split(",") if r.strip()]
+        if not text:
+            raise MnemoError(f"{path}:{number}: пустая формулировка перед `::`")
+        out.append((text, refs))
+    if not out:
+        raise MnemoError(f"{path}: ни одной записи")
+    return out
+
+
+def batch_plan(entries: list[tuple[str, list[str]]], existing: list[str],
+               kind: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """Что заведётся, а что уже есть.
+
+    План перед записью — по образцу импорта: там же двадцать сообщений разом, и
+    там же нельзя узнать после. Совпадением считаем точный текст: решать, что
+    две разные формулировки — одно требование, инструмент не вправе.
+    """
+    known = {normalize_text(t) for t in existing}
+    fresh, dupes = [], []
+    seen: set[str] = set()
+    for text, refs in entries:
+        key = normalize_text(text)
+        if key in known or key in seen:
+            dupes.append(text)
+            continue
+        seen.add(key)
+        fresh.append((text, refs))
+    print(f"файл: {len(entries)} строк")
+    print(f"заведётся: {len(fresh)}")
+    if dupes:
+        print(f"уже есть, пропускаются: {len(dupes)}")
+        for text in dupes[:5]:
+            print(f"    {text[:66]}")
+        if len(dupes) > 5:
+            print(f"    … и ещё {len(dupes) - 5}")
+    print()
+    for text, refs in fresh[:20]:
+        tail = f"   → {', '.join(refs)}" if refs else ""
+        print(f"  {kind}  {text[:62]}{tail}")
+    if len(fresh) > 20:
+        print(f"  … и ещё {len(fresh) - 20}")
+    return fresh, dupes
+
+
+def normalize_text(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
 def cmd_req(args) -> int:
     """Требование: что от нас хотят, дословно и с доказательством."""
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
+
+    if getattr(args, "batch", None):
+        if args.id:
+            raise MnemoError("--batch и --id несовместимы: пакет заводит новые записи")
+        if args.quote:
+            raise MnemoError("--batch и --quote несовместимы: формулировки берутся из файла")
+        if args.supersedes:
+            # Отмена — отношение между двумя конкретными требованиями. Один
+            # `--supersedes` на пакет означал бы, что двадцать новых записей
+            # отменяют одну и ту же, и девятнадцать из них — неправда.
+            raise MnemoError("--supersedes нельзя применить к пакету: отмена оформляется "
+                             "поштучно через req --id")
+        entries = read_batch(Path(args.batch).expanduser())
+        fresh, _ = batch_plan(entries, [r["quote"] for r in manifest["requirements"]],
+                              "требование")
+        if not args.apply:
+            print("\n— это план. Ничего не изменено. Повтори с --apply.")
+            return 0
+        if not fresh:
+            print("\nНовых требований нет — манифест не тронут.")
+            return 0
+        for text, refs in fresh:
+            record = new_requirement(
+                id=next_id(manifest, "requirement"), quote=text,
+                wanted_by=args.wanted_by,
+                based_on=refs or [b.strip() for b in (args.based_on or "").split(",") if b.strip()],
+                state=args.state or "stated", evidence=args.evidence,
+                blocking=args.blocking, blocking_since=args.blocking_since,
+                stage=args.stage, note=args.note, date=args.date,
+            )
+            manifest["requirements"].append(record)
+            print(f"{record['id']}  {record['state']}  {record['quote'][:56]}")
+        save_manifest(export, manifest)
+        return 0
 
     if args.id:  # обновление состояния существующего
         record = next((r for r in manifest["requirements"] if r["id"] == args.id), None)
@@ -692,6 +797,38 @@ def cmd_ask(args) -> int:
     """Открытый вопрос. Состояние выводится из содержимого, не хранится."""
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
+
+    if getattr(args, "batch", None):
+        if args.id:
+            raise MnemoError("--batch и --id несовместимы: пакет заводит новые записи")
+        if args.text:
+            raise MnemoError("--batch и --text несовместимы: вопросы берутся из файла")
+        if args.raised_to or args.answered_by or args.dropped_reason:
+            # Отметки «спросили», «ответили», «снят» относятся к конкретному
+            # вопросу. Один флаг на пакет пометил бы разом двадцать вопросов
+            # заданными — и следующая сводка молча перестала бы их поднимать.
+            raise MnemoError("отметки --raised-to / --answered-by / --dropped-reason "
+                             "к пакету не применяются: они про конкретный вопрос")
+        entries = read_batch(Path(args.batch).expanduser())
+        fresh, _ = batch_plan(entries, [q["text"] for q in manifest["questions"]], "вопрос")
+        if not args.apply:
+            print("\n— это план. Ничего не изменено. Повтори с --apply.")
+            return 0
+        if not fresh:
+            print("\nНовых вопросов нет — манифест не тронут.")
+            return 0
+        for text, refs in fresh:
+            record = new_question(
+                id=next_id(manifest, "question"), text=text, impact=args.impact,
+                blocking=args.blocking, blocking_since=args.blocking_since,
+                asked_of=args.asked_of,
+                based_on=refs or [b.strip() for b in (args.based_on or "").split(",") if b.strip()],
+                date=args.date,
+            )
+            manifest["questions"].append(record)
+            print(f"{record['id']}  {question_state(record)}  {record['text'][:56]}")
+        save_manifest(export, manifest)
+        return 0
 
     if args.id:
         record = next((q for q in manifest["questions"] if q["id"] == args.id), None)
@@ -944,6 +1081,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_req.add_argument("--supersedes", default=None, help="какое требование отменяет")
     p_req.add_argument("--note", default=None, help="расхождения, оговорки")
     p_req.add_argument("--date", default=None)
+    p_req.add_argument("--batch", default=None,
+                    help="файл со списком: по записи на строку, необязательный хвост после `::` — ссылки based_on")
+    p_req.add_argument("--apply", action="store_true",
+                    help="выполнить пакет (иначе только план)")
     p_req.set_defaults(func=cmd_req)
 
     p_ask = sub.add_parser("ask", help="открытый вопрос")
@@ -963,6 +1104,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--answered-by", dest="answered_by", default=None, help="ссылка на ответ")
     p_ask.add_argument("--dropped-reason", dest="dropped_reason", default=None)
     p_ask.add_argument("--date", default=None)
+    p_ask.add_argument("--batch", default=None,
+                    help="файл со списком: по записи на строку, необязательный хвост после `::` — ссылки based_on")
+    p_ask.add_argument("--apply", action="store_true",
+                    help="выполнить пакет (иначе только план)")
     p_ask.set_defaults(func=cmd_ask)
 
     p_rm = sub.add_parser("remove", help="снять запись с учёта, не правя манифест руками")

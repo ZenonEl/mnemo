@@ -12,6 +12,14 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/mnemo_manifest.py ask --export <dir> \
   [--blocking "<что стоит без ответа>"] [--asked-of "<у кого>"]
 ```
 
+**Завести пачкой:**
+```
+... ask --export <dir> --batch voprosy.md --asked-of "<у кого>"          # план
+... ask --export <dir> --batch voprosy.md --asked-of "<у кого>" --apply  # запись
+```
+По вопросу на строку, хвост после `::` — ссылки `based_on`. Отметки
+«спросили» / «отвечено» к пакету не применяются: они про конкретный вопрос.
+
 **Отметить, что спросили:**
 ```
 ... ask --export <dir> --id qNNN --raised-to "<кому>" --where "дейлик <репо>#110"

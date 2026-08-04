@@ -12,6 +12,15 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/mnemo_manifest.py req --export <dir> \
   --based-on "ctx:<slug>#iNNN" [--blocking "<что стоит без этого>"] [--stage "<этап>"]
 ```
 
+**Завести пачкой** — когда из ТЗ снимается два десятка требований разом:
+```
+... req --export <dir> --batch trebovaniya.md --wanted-by "<кто>"          # план
+... req --export <dir> --batch trebovaniya.md --wanted-by "<кто>" --apply  # запись
+```
+Файл — по требованию на строку; необязательный хвост после `::` задаёт ссылки
+`based_on` для этой строки. Общие поля берутся из флагов один раз. Совпадающие
+с уже заведёнными пропускаются, поэтому файл можно дополнять и прогонять снова.
+
 **Обновить состояние:**
 ```
 ... req --export <dir> --id tNNN --state done --evidence "<коммит, скрин, прогон>"
