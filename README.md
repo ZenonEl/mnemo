@@ -85,6 +85,7 @@ git clone https://github.com/ZenonEl/mnemo ~/.claude/plugins/mnemo
 | `/mnemo:note` | проверенный факт в `findings-log` |
 | `/mnemo:rule` | рабочее правило в `conventions` |
 | `/mnemo:redact` | зарегистрировать изъятие |
+| `/mnemo:remove` | снять запись с учёта, не правя манифест руками |
 | `/mnemo:sync` | пересобрать производные из манифеста |
 | `/mnemo:req` | требование заказчика: дословно, с доказательством |
 | `/mnemo:ask` | открытый вопрос: что блокирует, кому задан |
@@ -96,7 +97,7 @@ git clone https://github.com/ZenonEl/mnemo ~/.claude/plugins/mnemo
 
 ## Стандарт
 
-- [`SPEC/STANDARD.md`](SPEC/STANDARD.md) — раскладка, контракт `item`, правила (версия 1.9)
+- [`SPEC/STANDARD.md`](SPEC/STANDARD.md) — раскладка, контракт `item`, правила (версия 1.10)
 - [`SPEC/PROVENANCE.md`](SPEC/PROVENANCE.md) — модель достоверности и правила цитирования
 - [`SPEC/CITATION.md`](SPEC/CITATION.md) — формат ссылок `ctx:<slug>#<id>`
 - [`SPEC/CHANGELOG.md`](SPEC/CHANGELOG.md) — версии
@@ -116,10 +117,10 @@ git clone https://github.com/ZenonEl/mnemo ~/.claude/plugins/mnemo
 
 ## Связка
 
-mnemo — один из трёх инструментов вокруг рабочего контекста. Связаны они
-**одной строкой** — формат ссылки `ctx:<slug>#<id>`, см.
-[`SPEC/CITATION.md`](SPEC/CITATION.md). Ни общей библиотеки, ни базы, ни
-зависимостей.
+mnemo — один из трёх инструментов вокруг рабочего контекста. Разделяются
+**два опубликованных формата**: ссылка `ctx:<slug>#<id>` и сам манифест — оба
+описаны в [`SPEC/`](SPEC/CITATION.md) и версионированы. Ничего исполняемого не
+разделяется: ни библиотеки, ни процесса, ни базы.
 
 | Проект | Роль |
 |---|---|

@@ -171,6 +171,14 @@ def check(export: Path) -> Report:
     # V14 — участники опознаны. Предупреждение, а не ошибка: реестр наполняется
     # по мере знакомства с проектом, и пустой реестр не делает архив негодным.
     everyone = [name for item in items for name in item.get("participants", [])]
+    # §6б типизирует `wanted_by` и `asked_of` как человека из реестра — проверка
+    # смотрела только на участников материалов, и несуществующий заказчик
+    # проходил молча, а сводка печатала его как опознанного.
+    everyone += [r.get("wanted_by") for r in manifest.get("requirements", [])]
+    everyone += [q.get("asked_of") for q in manifest.get("questions", [])]
+    everyone += [m.get("to") for q in manifest.get("questions", [])
+                 for m in (q.get("raised") or [])]
+    everyone = [n for n in everyone if n]
     strangers = unknown_names(manifest, everyone)
     if strangers:
         report.warn(
@@ -297,7 +305,17 @@ def check(export: Path) -> Report:
         answer = record.get("answered_by")
         if answer and answer == qid:
             report.error("V20", "вопрос отвечает сам на себя — это не ответ", qid)
-        elif answer and not str(answer).startswith("ctx:") and answer not in all_ids:
+        elif answer and str(answer).startswith("ctx:"):
+            # Внешняя ссылка не проверяется по содержимому — архива под рукой
+            # может не быть, — но форму проверить обязаны: иначе `ctx:` работал
+            # лазейкой, через которую проходила любая строка.
+            if not re.fullmatch(r"ctx:[a-z0-9][a-z0-9-]*#[a-z]\d{3,}", str(answer)):
+                report.error(
+                    "V20",
+                    f"answered_by={answer} не похоже на ссылку ctx:<slug>#<id>",
+                    qid,
+                )
+        elif answer and answer not in all_ids:
             report.error(
                 "V20",
                 f"answered_by={answer} не ведёт ни в одну запись — "
@@ -318,7 +336,15 @@ def check(export: Path) -> Report:
     # 1.0 и содержащий разделы из 1.5, вводит в заблуждение любого читателя:
     # он не ждёт того, что там лежит.
     declared, needed = str(manifest.get("mnemo_spec", "1.0")), required_spec(manifest)
-    if tuple(int(x) for x in declared.split(".")) < tuple(int(x) for x in needed.split(".")):
+    try:
+        older = tuple(int(x) for x in declared.split(".")) < \
+            tuple(int(x) for x in needed.split("."))
+    except ValueError:
+        # Нечитаемая версия — это «проверить невозможно», а §13 требует, чтобы
+        # такое было ошибкой, а не падением: traceback не диагноз.
+        report.error("V18", f"mnemo_spec={declared!r} — не версия вида X.Y")
+        older = False
+    if older:
         report.error(
             "V18",
             f"заявлено mnemo_spec={declared}, но содержимое требует {needed} — "
@@ -350,8 +376,16 @@ def check(export: Path) -> Report:
             report.error("V11", f"файл вне разрешённых зон: {entry.name}")
 
     # V12 — данные не уедут в чужую репу
-    state, _ = git_status(export)
-    if state == "none":
+    # Публичный срез существует ровно затем, чтобы его показывать: держать его
+    # вне git бессмысленно, а правило, требующее этого, делает валидный срез
+    # непроходящим. Отбор в срез гарантирует `publish`, а не V12.
+    if manifest["export"].get("contour") == "public":
+        state = "public-slice"
+    else:
+        state, _ = git_status(export)
+    if state == "public-slice":
+        pass
+    elif state == "none":
         report.warn("V12", "хост-проект не под git — исключать нечего")
     elif state == "unknown":
         # Незнание — не разрешение. Раньше любой сбой git засчитывался как

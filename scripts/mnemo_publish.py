@@ -88,8 +88,13 @@ def build(export: Path, out: Path, manifest: dict, public: list[dict]) -> dict:
     }
     save_manifest(out, slim)
 
+    # Срез — самостоятельный экспорт, а не куча файлов: §2 требует полного
+    # состава. Раньше он выходил без обязательных сводок и падал по
+    # собственному линтеру, при этом команда рапортовала успех.
+    from mnemo_manifest import write_stubs
     from mnemo_render import sync
     (out / "summaries").mkdir(parents=True, exist_ok=True)
+    write_stubs(out)
     sync(out, rehash=False)
     return stats
 
@@ -154,7 +159,16 @@ def main() -> int:
         if leaked:
             print(f"  ❌ в срез попало непубличное: {leaked}")
             return 1
-        print(f"  проверка среза: {'✅' if report.ok else '⚠️ ' + str(len(report.errors)) + ' ошибок'}")
+        if not report.ok:
+            # Инструмент, объявляющий поддержку стандарта, не считает архив
+            # исправным при нарушении любого правила (§13). Рапортовать успех
+            # на непроходящем срезе — прямое нарушение собственной гарантии.
+            print(f"  ❌ срез не проходит линтер: ошибок {len(report.errors)}")
+            for entry in report.errors[:6]:
+                print(f"     {entry['code']}: {entry['message']}")
+            print("\nСрез собран, но отдавать его нельзя — это дефект инструмента.")
+            return 1
+        print("  проверка среза: ✅")
         print(f"\nсрез готов: {out}")
         print("Просмотри его глазами перед тем, как отдавать: публикация необратима.")
         return 0

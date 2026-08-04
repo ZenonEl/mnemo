@@ -19,7 +19,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.9"
+SPEC_VERSION = "1.10"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"
@@ -242,8 +242,11 @@ def empty_manifest(slug: str, title: str, project: str | None = None,
                    contour: str = "work", participants: list[str] | None = None) -> dict:
     if contour not in CONTOURS:
         raise MnemoError(f"contour должен быть одним из {CONTOURS}, получено {contour!r}")
+    # Пустой манифест не содержит ничего новее 1.0 — объявлять текущую версию
+    # значит без нужды закрывать его для инструментов постарше. Версия поднимется
+    # сама, когда появится раздел, который её требует (§14).
     return {
-        "mnemo_spec": SPEC_VERSION,
+        "mnemo_spec": "1.0",
         "export": {
             "slug": slug,
             "title": title,
@@ -314,7 +317,7 @@ def load_manifest(export: Path) -> dict:
     except ValueError as exc:
         raise MnemoError(f"нечитаемая версия стандарта: {spec!r}") from exc
     if major > SPEC_MAJOR:
-        # §12 стандарта: отказаться, а не угадывать.
+        # §14 стандарта: отказаться, а не угадывать.
         raise MnemoError(
             f"манифест версии {spec} новее поддерживаемой {SPEC_VERSION}. Обнови mnemo."
         )
@@ -529,6 +532,12 @@ def new_question(**kwargs: Any) -> dict:
         raise MnemoError("text обязателен")
     if record.get("blocking_since"):
         parse_day(record["blocking_since"])
+    for mark in record["raised"]:
+        # §6б называет `raised` несущим полем, но проверялось только наличие
+        # ключей: мусорная дата проходила и печаталась в сводке как есть.
+        if not str(mark.get("to") or "").strip():
+            raise MnemoError(f"{record['id']}: отметка «спрошено» без адресата")
+        parse_day(str(mark.get("at") or ""))
     if record.get("answered_by") == record["id"]:
         # Вопрос, отвечающий сам на себя, проходил бы как закрытый: его id есть
         # в множестве известных, и ссылка формально «ведёт в существующее».

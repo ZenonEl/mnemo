@@ -139,6 +139,10 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
             tail = f"  ({age} дн.)" if age is not None and age > 0 else ""
             out.append(f"  {q['id']}  {cut(q['text'], 70)}{tail}")
             out.append(f"       стоит: {q['blocking']}   [{mark}]")
+            if not q["raised"] and q.get("asked_of"):
+                # «Не спрашивали» без указания, у кого спрашивать, — половина
+                # ответа. Именно эта строка объявлена самой ценной в выводе.
+                out.append(f"       спросить у: {who(manifest, q['asked_of'])}")
             if q.get("impact"):
                 out.append(f"       от ответа зависит: {cut(q['impact'], 70)}")
             for raised in q["raised"]:

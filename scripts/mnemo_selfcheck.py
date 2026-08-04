@@ -62,7 +62,11 @@ def check(root: Path) -> list[str]:
     standard = (spec / "STANDARD.md").read_text(encoding="utf-8")
     verifier = (root / "scripts" / "mnemo_verify.py").read_text(encoding="utf-8")
     in_spec = {m for m in RULE_RE.findall(standard)}
-    implemented = {m for m in RULE_RE.findall(verifier) if f'"V{m}"' in verifier}
+    # Ищем ровно вызовы report.error("VNN"…) / report.warn("VNN"…), а не любое
+    # упоминание кода в файле. Прежняя проверка искала строку `"VNN"` где угодно,
+    # и комментарий вида «правило "V21" пока не сделано» засчитывался как
+    # реализация — самопроверка давала ложное «всё согласовано».
+    implemented = set(re.findall(r'report\.(?:error|warn)\(\s*"V(\d{2})"', verifier))
     for code in sorted(in_spec - implemented):
         problems.append(f"V{code} описано в стандарте, но не реализовано")
     for code in sorted(implemented - in_spec):
@@ -78,6 +82,30 @@ def check(root: Path) -> list[str]:
                 f"префикс `{prefix}` выдаётся кодом, но не описан в CITATION.md — "
                 "ссылка возможна, а нормативного описания нет"
             )
+    # И обратная сторона: описанный префикс, которого никто не выдаёт, обещает
+    # ссылку, которую невозможно получить, и линтер будет её отвергать.
+    for declared in set(re.findall(r"^\| `([a-z])` \|", citation, re.M)):
+        if declared not in prefixes:
+            problems.append(
+                f"префикс `{declared}` описан в CITATION.md, но код его не выдаёт — "
+                "документ обещает ссылку, которой не бывает"
+            )
+
+    # Команды: README перечисляет ровно то, что лежит в commands/.
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    on_disk = {f.stem for f in (root / "commands").glob("*.md")}
+    in_readme = set(re.findall(r"`/mnemo:([a-z-]+)`", readme))
+    for missing in sorted(on_disk - in_readme):
+        problems.append(f"команда /mnemo:{missing} существует, но не указана в README")
+    for phantom in sorted(in_readme - on_disk):
+        problems.append(f"README обещает /mnemo:{phantom}, а файла команды нет")
+
+    # Ссылки на разделы стандарта ведут в существующие разделы.
+    sections = set(re.findall(r"^## (\d+)[а-я]?\.", standard, re.M))
+    for source in (root / "SPEC").glob("*.md"):
+        for ref in re.findall(r"§(\d+)", source.read_text(encoding="utf-8")):
+            if ref not in sections:
+                problems.append(f"{source.name} ссылается на §{ref}, которого нет в STANDARD.md")
 
     # 4. Команды: файл на каждую и версия плагина совпадает с манифестом рынка.
     plugin = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
