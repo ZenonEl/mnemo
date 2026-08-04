@@ -41,7 +41,7 @@ from mnemo_core import (  # noqa: E402
 # Версия контракта чтения — своя, не версия стандарта: формат вывода может
 # устояться раньше, чем формат манифеста, и наоборот. Нормативное описание —
 # SPEC/QUERY.md, правила совместимости — STANDARD.md §14.
-QUERY_CONTRACT = "1"
+QUERY_CONTRACT = "2"
 
 STATE_MARK = {
     "verified": "✅", "done": "☑️", "accepted": "⏳",
@@ -99,17 +99,54 @@ def derived(record: dict) -> dict:
     return {"blocked_since": blocked_since(record), "days_blocked": days_blocked(record)}
 
 
+# Поля, которые в контракт чтения не выходят: рядом с выведенным соседом они —
+# ловушка, отличающаяся парой букв.
+#
+# `superseded` (булево, «меня отменили») стояло вплотную к хранимому
+# `supersedes` («я отменяю вот это»). Одно слово, две буквы разницы и
+# **противоположные направления**: прочитавший не то показал бы отменённое
+# требование живым, а живое спрятал. Наружу идёт `superseded_by` — не флаг, а
+# идентификатор того, чем заменено; направление читается из имени.
+SHADOWED = {"blocking_since": "blocked_since", "superseded": "superseded_by"}
+
+
+def for_contract(record: dict) -> dict:
+    """Запись в том виде, в каком её отдают наружу.
+
+    `blocking_since` — хранимое и чаще всего `null`: блокировка обычно
+    появляется вместе с записью, и тогда дата берётся из `date`. Выведенное
+    `blocked_since` даёт настоящий ответ. Имена различались двумя буквами и
+    лежали в одном объекте, так что `blocking_since: null` соседствовал с
+    `blocked_since: "2026-08-04"`.
+
+    Потребитель, прочитавший хранимое, получал «не блокирует» и **молча**
+    терял все блокеры — результат выглядел как «блокеров сегодня нет». Ровно
+    тот класс ошибки, ради которого контракт и заводился: два поля про одно и
+    то же, расходящиеся незаметно.
+
+    Поэтому наружу идёт только выведенное. В манифесте хранимое остаётся: там
+    оно единственное и ни с чем не соседствует.
+    """
+    return {k: v for k, v in record.items() if k not in SHADOWED}
+
+
 def collect(manifest: dict) -> dict:
     # Манифест могли править руками или сторонним кодом. Сводка обязана
     # показать повреждённую запись, а не упасть на ней: падение прячет и все
     # остальные, а разбираться человеку — по выводу линтера.
     dead = superseded_ids(manifest)
+    # Кем именно отменено — обратная сторона `supersedes`. Флага «отменено» мало:
+    # он не говорит, чем заменено, и потребителю пришлось бы строить эту карту
+    # самому, разбирая манифест.
+    replaced_by = {r["supersedes"]: r.get("id") for r in manifest.get("requirements", [])
+                   if r.get("supersedes")}
     reqs = []
     for record in manifest.get("requirements", []):
         full = {**REQ_DEFAULTS, **record}
         if full["state"] not in ("stated", "accepted", "done", "verified", "dropped"):
             full["state"] = "stated"
-        reqs.append({**full, "superseded": full["id"] in dead, **derived(full)})
+        reqs.append({**full, "superseded": full["id"] in dead,
+                     "superseded_by": replaced_by.get(full["id"]), **derived(full)})
     questions = [{**Q_DEFAULTS, **q, "state": question_state(q), **derived(q)}
                  for q in manifest.get("questions", [])]
 
@@ -271,7 +308,8 @@ def main() -> int:
             # ссылку не построить, и он полез бы за ней в манифест — ровно то,
             # чего контракт чтения должен избавить.
             "export": {"slug": meta.get("slug"), "title": meta.get("title")},
-            **data,
+            **{bucket: [for_contract(r) for r in records]
+               for bucket, records in data.items()},
         }, ensure_ascii=False, indent=2))
     else:
         print("\n".join(report(manifest, data, args.open_only)))
