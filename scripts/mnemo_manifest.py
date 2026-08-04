@@ -13,6 +13,8 @@
     add-gap     завести запись о материале, которого нет
     redact      зарегистрировать изъятие
     rehash      пересчитать хеши после легитимной замены файла
+    req         требование заказчика: что от нас хотят
+    ask         открытый вопрос: чего мы не знаем
     show        показать манифест или отдельную запись
 """
 
@@ -27,11 +29,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    CONTOURS, DEFAULT_EXPORT_DIR, FIDELITIES, INDEX_NAME, MANIFEST_NAME, PERSON_ROLES,
+    CONTOURS, DEFAULT_EXPORT_DIR, FIDELITIES, REQUIREMENT_STATES, INDEX_NAME, MANIFEST_NAME, PERSON_ROLES,
     RAW_ZONES, REDACTION_REASONS,
     SOURCES, STATUSES, MnemoError, ensure_skeleton, empty_manifest, find_export,
     contained, find_item, load_manifest, message_filename, new_item, new_person,
-    new_redaction, next_id,
+    new_question, new_redaction, new_requirement, next_id, question_state,
     parse_day, rel, resolve_person, save_manifest, sha256_file, slugify, today,
 )
 
@@ -153,6 +155,59 @@ def exclude_from_git(export: Path) -> str:
     return f"добавлено в {shown}: /{rule}/"
 
 
+CLAUDE_MD_MARK = "<!-- mnemo:archive -->"
+
+
+def announce_in_claude_md(export: Path) -> str:
+    """Прописать архив в CLAUDE.md проекта.
+
+    Пять замеров подряд показали одно: `INDEX.md` открывали ноль раз в четырёх
+    независимых проектах. Не потому что он плох — потому что **сессия не знает,
+    что архив существует**. Она читает CLAUDE.md на старте, и архива в этом
+    списке нет.
+
+    Вход в архив — действие один раз за сессию, и документ, читаемый один раз за
+    сессию, ровно под это и подходит. Ведение он не чинит: правило «Основано на»
+    уже лежало в CLAUDE.md и прожило сутки. Для ведения нужен хук, не текст.
+
+    Ведём на `audit` и `findings-log`, а не на `INDEX.md`: возвращающейся сессии
+    нужен не список материалов, а список выводов и открытого.
+    """
+    host = export.parent
+    target = host / "CLAUDE.md"
+    existing = target.read_text(encoding="utf-8") if target.is_file() else ""
+    if CLAUDE_MD_MARK in existing:
+        return "уже прописан в CLAUDE.md"
+
+    name = export.name
+    block = f"""
+{CLAUDE_MD_MARK}
+## Архив контекста — `{name}/`
+
+Дословный архив материалов проекта с провенансом: переписка, документы, скрины,
+голосовые. Ведётся плагином mnemo.
+
+**Начинать отсюда, а не с поиска по репе:**
+
+- `{name}/summaries/findings-log.md` — что уже выяснено. Читать при возврате к работе.
+- `/mnemo:audit` — всё ли сделано, как хотел заказчик; что блокирует; что не спрошено.
+- `{name}/INDEX.md` — что вообще есть и откуда. Когда ищешь конкретный материал.
+
+**Правила:**
+
+- Цитировать: `ctx:{name}#iNNN`. Уровень достоверности обязателен — `digest`
+  (конспект, машинная расшифровка) **нельзя** приводить как чьи-то слова.
+- Пополнять командами `/mnemo:import`, `/mnemo:add-*`, `/mnemo:req`, `/mnemo:ask`.
+  `MANIFEST.json` и `INDEX.md` руками не править.
+- Требование заказчика в состоянии `done` обязано нести доказательство.
+"""
+    with target.open("a", encoding="utf-8") as handle:
+        if existing and not existing.endswith("\n"):
+            handle.write("\n")
+        handle.write(block)
+    return f"архив прописан в {target.name} — сессии его увидят на старте"
+
+
 def trash_file(path: Path) -> str:
     """Убрать файл в корзину. Безвозвратного удаления в инструменте нет."""
     if shutil.which("trash-put") is None:
@@ -255,6 +310,7 @@ def cmd_init(args) -> int:
     # стандарта). Порядок здесь — не стилистика: наоборот было бы окном, в
     # котором рабочий материал уже лежит в отслеживаемом каталоге.
     git_note = exclude_from_git(export)
+    claude_note = announce_in_claude_md(export)
 
     # Собираем производные сразу: пустой, но валидный экспорт лучше «почти
     # созданного», на котором линтер падает по V07.
@@ -264,6 +320,7 @@ def cmd_init(args) -> int:
     print(f"экспорт создан: {export}")
     print(f"  slug: {manifest['export']['slug']}")
     print(f"  git:  {git_note}")
+    print(f"  CLAUDE.md: {claude_note}")
     if export.name != DEFAULT_EXPORT_DIR:
         # Однократная подсказка при создании, а не правило линтера: принятые
         # экспорты живут под историческими именами, и вечное предупреждение
@@ -503,6 +560,76 @@ def cmd_rehash(args) -> int:
     return 0
 
 
+def cmd_req(args) -> int:
+    """Требование: что от нас хотят, дословно и с доказательством."""
+    export = find_export(Path(args.export))
+    manifest = load_manifest(export)
+
+    if args.id:  # обновление состояния существующего
+        record = next((r for r in manifest["requirements"] if r["id"] == args.id), None)
+        if record is None:
+            raise MnemoError(f"нет требования {args.id}")
+        for field in ("state", "evidence", "blocking", "stage", "note"):
+            value = getattr(args, field, None)
+            if value is not None:
+                record[field] = value
+        new_requirement(**record)  # перепроверка контракта после правки
+        save_manifest(export, manifest)
+        print(f"{record['id']}  {record['state']}  {record['quote'][:56]}")
+        return 0
+
+    if not args.quote:
+        raise MnemoError("--quote обязателен: дословно, как было сказано")
+    record = new_requirement(
+        id=next_id(manifest, "requirement"), quote=args.quote,
+        wanted_by=args.wanted_by, based_on=[b.strip() for b in (args.based_on or "").split(",") if b.strip()],
+        state=args.state or "stated", evidence=args.evidence, blocking=args.blocking,
+        stage=args.stage, supersedes=args.supersedes, note=args.note, date=args.date,
+    )
+    manifest["requirements"].append(record)
+    save_manifest(export, manifest)
+    print(f"{record['id']}  {record['state']}  {record['quote'][:56]}")
+    return 0
+
+
+def cmd_ask(args) -> int:
+    """Открытый вопрос. Состояние выводится из содержимого, не хранится."""
+    export = find_export(Path(args.export))
+    manifest = load_manifest(export)
+
+    if args.id:
+        record = next((q for q in manifest["questions"] if q["id"] == args.id), None)
+        if record is None:
+            raise MnemoError(f"нет вопроса {args.id}")
+        if args.raised_to:
+            # Отметка «спросили» — накопительная: вопрос могли поднимать дважды,
+            # и это разные события, а не перезапись одного.
+            record["raised"].append({
+                "to": args.raised_to, "at": args.date or today(),
+                "where": args.where or "",
+            })
+        for field in ("impact", "blocking", "answered_by", "dropped_reason"):
+            value = getattr(args, field, None)
+            if value is not None:
+                record[field] = value
+        save_manifest(export, manifest)
+        print(f"{record['id']}  {question_state(record)}  {record['text'][:56]}")
+        return 0
+
+    if not args.text:
+        raise MnemoError("--text обязателен")
+    record = new_question(
+        id=next_id(manifest, "question"), text=args.text, impact=args.impact,
+        blocking=args.blocking, asked_of=args.asked_of,
+        based_on=[b.strip() for b in (args.based_on or "").split(",") if b.strip()],
+        date=args.date,
+    )
+    manifest["questions"].append(record)
+    save_manifest(export, manifest)
+    print(f"{record['id']}  {question_state(record)}  {record['text'][:56]}")
+    return 0
+
+
 def cmd_remove(args) -> int:
     """Снять запись с учёта.
 
@@ -694,6 +821,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_hash.add_argument("--confirm", action="store_true", help="подтвердить замену RAW")
     p_hash.add_argument("--reason", default=None, help="чем объясняется замена")
     p_hash.set_defaults(func=cmd_rehash)
+
+    p_req = sub.add_parser("req", help="требование заказчика")
+    p_req.add_argument("--export", default=".")
+    p_req.add_argument("--id", default=None, help="обновить существующее")
+    p_req.add_argument("--quote", default=None, help="дословно, как было сказано")
+    p_req.add_argument("--wanted-by", dest="wanted_by", default=None, help="кто хочет (id из реестра)")
+    p_req.add_argument("--based-on", dest="based_on", default="", help="ссылки через запятую")
+    p_req.add_argument("--state", choices=REQUIREMENT_STATES, default=None)
+    p_req.add_argument("--evidence", default=None, help="чем подтверждено (для done/verified)")
+    p_req.add_argument("--blocking", default=None, help="что стоит без этого")
+    p_req.add_argument("--stage", default=None, help="к какому этапу относится")
+    p_req.add_argument("--supersedes", default=None, help="какое требование отменяет")
+    p_req.add_argument("--note", default=None, help="расхождения, оговорки")
+    p_req.add_argument("--date", default=None)
+    p_req.set_defaults(func=cmd_req)
+
+    p_ask = sub.add_parser("ask", help="открытый вопрос")
+    p_ask.add_argument("--export", default=".")
+    p_ask.add_argument("--id", default=None, help="обновить существующий")
+    p_ask.add_argument("--text", default=None)
+    p_ask.add_argument("--impact", default=None, help="что меняется от ответа")
+    p_ask.add_argument("--blocking", default=None, help="что стоит без ответа")
+    p_ask.add_argument("--asked-of", dest="asked_of", default=None)
+    p_ask.add_argument("--based-on", dest="based_on", default="", help="ссылки через запятую")
+    p_ask.add_argument("--raised-to", dest="raised_to", default=None, help="отметить, что спросили у ...")
+    p_ask.add_argument("--where", default=None, help="где спросили: issue, дейлик, чат")
+    p_ask.add_argument("--answered-by", dest="answered_by", default=None, help="ссылка на ответ")
+    p_ask.add_argument("--dropped-reason", dest="dropped_reason", default=None)
+    p_ask.add_argument("--date", default=None)
+    p_ask.set_defaults(func=cmd_ask)
 
     p_rm = sub.add_parser("remove", help="снять запись с учёта, не правя манифест руками")
     p_rm.add_argument("--export", default=".")

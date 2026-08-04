@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Линтер стандарта: правила V01–V18 из SPEC/STANDARD.md §13.
+"""Линтер стандарта: правила V01–V20 из SPEC/STANDARD.md §13.
 
 Детерминированный, без участия модели. Линтер, работающий «на усмотрение», —
 не линтер: он не может подтвердить, что архив цел, а именно это от него нужно.
@@ -19,9 +19,10 @@ from urllib.parse import unquote
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
     ALLOWED_TOP, ATTRIBUTIONS, CONTOURS, FIDELITIES, INDEX_NAME, MANIFEST_NAME,
-    PERSON_ROLES, REDACTION_REASONS, REQUIRED_FILES,
+    PERSON_ROLES, REDACTION_REASONS, REQUIRED_FILES, REQUIREMENT_STATES,
     SOURCES, STATUSES, MnemoError, all_tracked_paths, find_export, iter_raw_files,
-    load_manifest, parse_day, rel, required_spec, sha256_file, unknown_names,
+    load_manifest, parse_day, question_state, rel, required_spec, sha256_file,
+    unknown_names,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -251,6 +252,57 @@ def check(export: Path) -> Report:
                     pid,
                 )
             handles_seen[key2] = pid
+
+    # V19 — контракт требования. «Сделано» без доказательства — мнение, а не
+    # отчёт; именно на этом вопрос «всё ли мы сделали» и разваливается.
+    req_ids = {r.get("id") for r in manifest.get("requirements", [])}
+    seen_req: set[str] = set()
+    for record in manifest.get("requirements", []):
+        rid = record.get("id", "?")
+        if rid in seen_req:
+            report.error("V19", "дублирующийся id требования", rid)
+        seen_req.add(rid)
+        if not str(record.get("quote") or "").strip():
+            report.error("V19", "пустая цитата — требование без формулировки непроверяемо", rid)
+        if record.get("state") not in REQUIREMENT_STATES:
+            report.error("V19", f"state={record.get('state')!r} вне допустимых", rid)
+        if record.get("state") in ("done", "verified") and not str(record.get("evidence") or "").strip():
+            report.error("V19", f"state={record.get('state')} без evidence", rid)
+        sup = record.get("supersedes")
+        if sup:
+            if sup not in req_ids:
+                report.error("V19", f"supersedes указывает на несуществующее {sup}", rid)
+            if sup == rid:
+                report.error("V19", "требование отменяет само себя", rid)
+
+    # V20 — контракт вопроса. Состояние выводится, поэтому проверяем то, из чего
+    # оно выводится: ссылку на ответ и отметки «спрашивали».
+    all_ids = req_ids | {i.get("id") for i in items} | {q.get("id") for q in manifest.get("questions", [])}
+    seen_q: set[str] = set()
+    for record in manifest.get("questions", []):
+        qid = record.get("id", "?")
+        if qid in seen_q:
+            report.error("V20", "дублирующийся id вопроса", qid)
+        seen_q.add(qid)
+        if not str(record.get("text") or "").strip():
+            report.error("V20", "пустой текст вопроса", qid)
+        answer = record.get("answered_by")
+        if answer and not str(answer).startswith("ctx:") and answer not in all_ids:
+            report.error(
+                "V20",
+                f"answered_by={answer} не ведёт ни в одну запись — "
+                "вопрос закрывается ссылкой на доказательство, а не словом",
+                qid,
+            )
+        for raised in record.get("raised") or []:
+            if not raised.get("to") or not raised.get("at"):
+                report.error("V20", "отметка «спрошено» без адресата или даты", qid)
+        if question_state(record) == "open" and record.get("blocking"):
+            report.warn(
+                "V20",
+                f"блокирующий вопрос ни разу не задан: {str(record.get('text'))[:48]}",
+                qid,
+            )
 
     # V18 — заявленная версия не отстаёт от содержимого. Манифест, объявляющий
     # 1.0 и содержащий разделы из 1.5, вводит в заблуждение любого читателя:

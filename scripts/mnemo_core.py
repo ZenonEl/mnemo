@@ -19,7 +19,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.6"
+SPEC_VERSION = "1.7"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"
@@ -39,6 +39,8 @@ ATTRIBUTIONS = ("reliable", "forwarder-shown", "unknown")
 # «с клиентом общаемся только через начальство» — это соглашение конкретной
 # команды, ему место в conventions.md, а не в общем стандарте.
 PERSON_ROLES = ("self", "colleague", "management", "client", "other")
+# Состояние требования — суждение, которое делаем мы, поэтому пишется явно.
+REQUIREMENT_STATES = ("stated", "accepted", "done", "verified", "dropped")
 REDACTION_REASONS = ("pii", "off-topic", "leaked-internal", "client-confidential")
 
 # Зона RAW по виду материала. Ключи — то, чем оперируют команды add-*.
@@ -241,6 +243,8 @@ def empty_manifest(slug: str, title: str, project: str | None = None,
         "imports": [],
         "people": [],
         "retired": [],
+        "requirements": [],
+        "questions": [],
     }
 
 
@@ -251,6 +255,8 @@ SECTION_SINCE = (
     ("imports", "1.1"),
     ("people", "1.2"),
     ("retired", "1.5"),
+    ("requirements", "1.7"),
+    ("questions", "1.7"),
 )
 ITEM_FIELD_SINCE = (("attribution", "1.1"),)
 
@@ -303,6 +309,8 @@ def load_manifest(export: Path) -> dict:
     data.setdefault("imports", [])
     data.setdefault("people", [])
     data.setdefault("retired", [])
+    data.setdefault("requirements", [])
+    data.setdefault("questions", [])
     return data
 
 
@@ -333,7 +341,12 @@ def next_id(manifest: dict, kind: str = "item") -> str:
     Счётчик, а не ULID — скрипты обязаны работать на голой стандартной библиотеке,
     а сортировка нужна по `date`, не по идентификатору.
     """
-    prefix, bucket = ("i", "items") if kind == "item" else ("r", "redactions")
+    prefix, bucket = {
+        "item": ("i", "items"),
+        "redaction": ("r", "redactions"),
+        "requirement": ("t", "requirements"),
+        "question": ("q", "questions"),
+    }[kind]
     used = 0
     # Отставленные идентификаторы учитываются наравне с живыми: §5 требует, что
     # id не переиспользуется. Ссылку на него могли записать в issue, в дейлик,
@@ -430,6 +443,90 @@ def validate_item(item: dict) -> None:
             raise MnemoError(f"{item['id']}: при status=unrecoverable fidelity должен быть placeholder")
     elif item["raw_path"] is None:
         raise MnemoError(f"{item['id']}: raw_path обязателен при status={item['status']}")
+
+
+def new_requirement(**kwargs: Any) -> dict:
+    """Требование — чужая воля: что от нас хотят.
+
+    Отличается от факта и решения авторством. Факт мы проверили, решение мы
+    выбрали, а требование **высказал кто-то другой** — поэтому у него есть
+    дословная цитата, автор и материал, в котором оно прозвучало.
+
+    Поля `blocking` и `stage` подняты из живого `open-questions.md`: там вопросы
+    сгруппированы по тому, стоит ли без них работа, и у каждого написано, что
+    меняется от ответа. Без этой оси сводка возвращает сорок пунктов вперемешку
+    и тонет в неважном.
+    """
+    record = {
+        "id": kwargs["id"],
+        "quote": kwargs["quote"],
+        "wanted_by": kwargs.get("wanted_by"),
+        "based_on": _dedupe(kwargs.get("based_on")),
+        "state": kwargs.get("state", "stated"),
+        "evidence": kwargs.get("evidence"),
+        "blocking": kwargs.get("blocking"),
+        "stage": kwargs.get("stage"),
+        "supersedes": kwargs.get("supersedes"),
+        "note": kwargs.get("note"),
+        "date": kwargs.get("date") or today(),
+    }
+    if record["state"] not in REQUIREMENT_STATES:
+        raise MnemoError(f"state должен быть одним из {REQUIREMENT_STATES}")
+    if not str(record["quote"]).strip():
+        raise MnemoError("quote обязателен: дословно, как было сказано")
+    if record["state"] in ("done", "verified") and not (record["evidence"] or "").strip():
+        # «Сделано» без доказательства — это мнение, а не отчёт. Ровно тот случай,
+        # ради которого весь архив и заводился.
+        raise MnemoError(
+            f"{record['id']}: state={record['state']} требует --evidence — "
+            "чем именно подтверждено, что сделано"
+        )
+    parse_day(record["date"])
+    return record
+
+
+def new_question(**kwargs: Any) -> dict:
+    """Открытый вопрос. Состояние **выводится**, а не хранится.
+
+    Хранимый статус «отвечено» — утверждение, которому нечем возразить.
+    Выведенный из `answered_by` и `raised` — проверяемый факт: либо есть ссылка
+    на ответ, либо нет.
+
+    `raised` отвечает на «а это разве не спрашивали уже?»: без него следующая
+    сводка поднимает вопрос заново как новый.
+    """
+    record = {
+        "id": kwargs["id"],
+        "text": kwargs["text"],
+        "impact": kwargs.get("impact"),
+        "blocking": kwargs.get("blocking"),
+        "asked_of": kwargs.get("asked_of"),
+        "based_on": _dedupe(kwargs.get("based_on")),
+        "raised": list(kwargs.get("raised") or []),
+        "answered_by": kwargs.get("answered_by"),
+        "dropped_reason": kwargs.get("dropped_reason"),
+        "date": kwargs.get("date") or today(),
+    }
+    if not str(record["text"]).strip():
+        raise MnemoError("text обязателен")
+    parse_day(record["date"])
+    return record
+
+
+def question_state(record: dict) -> str:
+    """Состояние вопроса, выведенное из содержимого."""
+    if record.get("dropped_reason"):
+        return "dropped"
+    if record.get("answered_by"):
+        return "answered"
+    if record.get("raised"):
+        return "raised"
+    return "open"
+
+
+def superseded_ids(manifest: dict, bucket: str = "requirements") -> set[str]:
+    """Идентификаторы, отменённые более поздними записями."""
+    return {r["supersedes"] for r in manifest.get(bucket, []) if r.get("supersedes")}
 
 
 def new_redaction(**kwargs: Any) -> dict:
