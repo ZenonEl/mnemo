@@ -41,6 +41,15 @@ STATE_MARK = {
 Q_MARK = {"open": "❓", "raised": "📨", "answered": "✅", "dropped": "✖️"}
 
 
+def cut(text: str, limit: int) -> str:
+    """Обрезать по границе слова: «всё в »» с висящей кавычкой читается плохо."""
+    text = " ".join(str(text).split())
+    if len(text) <= limit:
+        return text
+    head = text[:limit].rsplit(" ", 1)[0]
+    return (head or text[:limit]) + "…"
+
+
 def who(manifest: dict, ident: str | None) -> str:
     if not ident:
         return "—"
@@ -48,12 +57,26 @@ def who(manifest: dict, ident: str | None) -> str:
     return person["display"] if person else ident
 
 
+REQ_DEFAULTS = {"quote": "<без формулировки>", "state": "stated", "date": "1970-01-01",
+                "based_on": [], "blocking": None, "evidence": None, "stage": None,
+                "note": None, "wanted_by": None, "supersedes": None, "id": "?"}
+Q_DEFAULTS = {"text": "<без текста>", "date": "1970-01-01", "raised": [], "blocking": None,
+              "impact": None, "answered_by": None, "asked_of": None, "id": "?"}
+
+
 def collect(manifest: dict) -> dict:
+    # Манифест могли править руками или сторонним кодом. Сводка обязана
+    # показать повреждённую запись, а не упасть на ней: падение прячет и все
+    # остальные, а разбираться человеку — по выводу линтера.
     dead = superseded_ids(manifest)
     reqs = []
     for record in manifest.get("requirements", []):
-        reqs.append({**record, "superseded": record["id"] in dead})
-    questions = [{**q, "state": question_state(q)} for q in manifest.get("questions", [])]
+        full = {**REQ_DEFAULTS, **record}
+        if full["state"] not in ("stated", "accepted", "done", "verified", "dropped"):
+            full["state"] = "stated"
+        reqs.append({**full, "superseded": full["id"] in dead})
+    questions = [{**Q_DEFAULTS, **q, "state": question_state(q)}
+                 for q in manifest.get("questions", [])]
 
     # Порядок: блокирующее вперёд, среди блокирующего — давнее вперёд, затем
     # незакрытое, затем по дате. «Висит третий день» должно быть видно сверху. Ровно то,
@@ -84,9 +107,14 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
     open_q = [q for q in questions if q["state"] in ("open", "raised")]
 
     out = [f"АУДИТ — {meta['title']}", ""]
-    out.append(f"Требований: {len(live)} живых "
-               f"(подтверждено {len(confirmed)}, заявлено сделанным {len(claimed)}, "
-               f"в работе {len(pending)})")
+    # Прежняя формулировка «заявлено сделанным» читалась как «без доказательства»,
+    # хотя `done` без доказательства линтер не пропускает вовсе. Разница между
+    # done и verified — не в наличии доказательства, а в том, принял ли его тот,
+    # кто требование выдвинул.
+    out.append(f"Требований живых: {len(live)} — "
+               f"принято заказчиком {len(confirmed)}, "
+               f"сделано и ждёт приёмки {len(claimed)}, "
+               f"в работе {len(pending)}")
     out.append(f"Вопросов открытых: {len(open_q)} из {len(questions)}")
     superseded = [r for r in reqs if r["superseded"]]
     if superseded:
@@ -101,7 +129,7 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
         for r in blocking_r:
             age = days_blocked(r)
             tail = f"  ({age} дн.)" if age is not None and age > 0 else ""
-            out.append(f"  {r['id']}  «{r['quote'][:70]}»{tail}")
+            out.append(f"  {r['id']}  «{cut(r['quote'], 70)}»{tail}")
             out.append(f"       стоит: {r['blocking']}")
             out.append(f"       хочет: {who(manifest, r.get('wanted_by'))}"
                        + (f" · {', '.join(r['based_on'])}" if r.get("based_on") else ""))
@@ -109,10 +137,10 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
             mark = "уже спрашивали" if q["raised"] else "НЕ СПРАШИВАЛИ"
             age = days_blocked(q)
             tail = f"  ({age} дн.)" if age is not None and age > 0 else ""
-            out.append(f"  {q['id']}  {q['text'][:70]}{tail}")
+            out.append(f"  {q['id']}  {cut(q['text'], 70)}{tail}")
             out.append(f"       стоит: {q['blocking']}   [{mark}]")
             if q.get("impact"):
-                out.append(f"       от ответа зависит: {q['impact'][:70]}")
+                out.append(f"       от ответа зависит: {cut(q['impact'], 70)}")
             for raised in q["raised"]:
                 out.append(f"       спрошено {raised['at']} у {who(manifest, raised['to'])}"
                            + (f" ({raised['where']})" if raised.get("where") else ""))
@@ -126,14 +154,14 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
             if q["raised"]:
                 last = q["raised"][-1]
                 tail = f"  ← спрошено {last['at']} у {who(manifest, last['to'])}"
-            out.append(f"  {Q_MARK[q['state']]} {q['id']}  {q['text'][:66]}{tail}")
+            out.append(f"  {Q_MARK[q['state']]} {q['id']}  {cut(q['text'], 66)}{tail}")
         out.append("")
 
     if not open_only:
         out += ["━━━ ТРЕБОВАНИЯ ━━━", ""]
         for r in [x for x in reqs if not x["superseded"]]:
             mark = STATE_MARK[r["state"]]
-            out.append(f"  {mark} {r['id']}  «{r['quote'][:64]}»")
+            out.append(f"  {mark} {r['id']}  «{cut(r['quote'], 64)}»")
             detail = []
             if r.get("evidence"):
                 detail.append(f"подтверждено: {r['evidence']}")
@@ -164,8 +192,13 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
         out.append(f"Да: все {len(confirmed)} требований подтверждены доказательством.")
     if open_q:
         never = [q for q in open_q if not q["raised"]]
-        if never:
-            out.append(f"Не спрошено ни разу: {len(never)} — их стоит задать.")
+        never_blocking = [q for q in never if q.get("blocking")]
+        if never_blocking:
+            out.append(f"Блокирует и ни разу не спрошено: {len(never_blocking)} — "
+                       "задать в первую очередь.")
+        rest_never = len(never) - len(never_blocking)
+        if rest_never:
+            out.append(f"Не спрошено ни разу, но работу не блокирует: {rest_never}.")
     return out
 
 

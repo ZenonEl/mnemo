@@ -22,7 +22,7 @@ from mnemo_core import (  # noqa: E402
     PERSON_ROLES, REDACTION_REASONS, REQUIRED_FILES, REQUIREMENT_STATES,
     SOURCES, STATUSES, MnemoError, all_tracked_paths, find_export, iter_raw_files,
     load_manifest, parse_day, question_state, rel, required_spec, sha256_file,
-    unknown_names,
+    supersede_cycles, unknown_names,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -274,6 +274,14 @@ def check(export: Path) -> Report:
                 report.error("V19", f"supersedes указывает на несуществующее {sup}", rid)
             if sup == rid:
                 report.error("V19", "требование отменяет само себя", rid)
+    for cycle in supersede_cycles(manifest):
+        # Взаимная отмена помечает отменёнными обе записи, и обе исчезают из
+        # живых — содержательное требование пропадает из отчёта без ошибки.
+        report.error(
+            "V19",
+            "цикл отмен: " + " → ".join(cycle + [cycle[0]])
+            + " — все участники выпадут из сводки как отменённые",
+        )
 
     # V20 — контракт вопроса. Состояние выводится, поэтому проверяем то, из чего
     # оно выводится: ссылку на ответ и отметки «спрашивали».
@@ -287,7 +295,9 @@ def check(export: Path) -> Report:
         if not str(record.get("text") or "").strip():
             report.error("V20", "пустой текст вопроса", qid)
         answer = record.get("answered_by")
-        if answer and not str(answer).startswith("ctx:") and answer not in all_ids:
+        if answer and answer == qid:
+            report.error("V20", "вопрос отвечает сам на себя — это не ответ", qid)
+        elif answer and not str(answer).startswith("ctx:") and answer not in all_ids:
             report.error(
                 "V20",
                 f"answered_by={answer} не ведёт ни в одну запись — "

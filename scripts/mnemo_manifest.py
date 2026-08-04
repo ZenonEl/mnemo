@@ -29,12 +29,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    CONTOURS, DEFAULT_EXPORT_DIR, FIDELITIES, REQUIREMENT_STATES, INDEX_NAME, MANIFEST_NAME, PERSON_ROLES,
+    ATTRIBUTIONS, CONTOURS, DEFAULT_EXPORT_DIR, FIDELITIES, REQUIREMENT_STATES, INDEX_NAME, MANIFEST_NAME, PERSON_ROLES,
     RAW_ZONES, REDACTION_REASONS,
     SOURCES, STATUSES, MnemoError, ensure_skeleton, empty_manifest, find_export,
     contained, find_item, load_manifest, message_filename, new_item, new_person,
-    blocked_since, new_question, new_redaction, new_requirement, next_id,
-    question_state,
+    blocked_since, find_record, new_question, new_redaction, new_requirement,
+    next_id, question_state,
     parse_day, rel, resolve_person, save_manifest, sha256_file, slugify, today,
 )
 
@@ -159,7 +159,7 @@ def exclude_from_git(export: Path) -> str:
 CLAUDE_MD_MARK = "<!-- mnemo:archive -->"
 
 
-def announce_in_claude_md(export: Path) -> str:
+def announce_in_claude_md(export: Path, slug: str) -> str:
     """Прописать архив в CLAUDE.md проекта.
 
     Пять замеров подряд показали одно: `INDEX.md` открывали ноль раз в четырёх
@@ -181,6 +181,11 @@ def announce_in_claude_md(export: Path) -> str:
         return "уже прописан в CLAUDE.md"
 
     name = export.name
+    # Ссылка строится от СЛАГА, не от имени каталога. Раньше здесь стояло имя
+    # каталога, и сгенерированный файл — первое, что читает свежая сессия, —
+    # учил формату, которого нет в стандарте. Ссылки уезжают в issue и дейлики
+    # и живут дольше архива, а линтер их не проверяет: тихая ошибка ровно того
+    # класса, против которого проект и заведён.
     block = f"""
 {CLAUDE_MD_MARK}
 ## Архив контекста — `{name}/`
@@ -196,16 +201,22 @@ def announce_in_claude_md(export: Path) -> str:
 
 **Правила:**
 
-- Цитировать: `ctx:{name}#iNNN`. Уровень достоверности обязателен — `digest`
+- Цитировать: `ctx:{slug}#iNNN` (слаг экспорта, не имя каталога). Уровень достоверности обязателен — `digest`
   (конспект, машинная расшифровка) **нельзя** приводить как чьи-то слова.
 - Пополнять командами `/mnemo:import`, `/mnemo:add-*`, `/mnemo:req`, `/mnemo:ask`.
   `MANIFEST.json` и `INDEX.md` руками не править.
 - Требование заказчика в состоянии `done` обязано нести доказательство.
 """
-    with target.open("a", encoding="utf-8") as handle:
-        if existing and not existing.endswith("\n"):
-            handle.write("\n")
-        handle.write(block)
+    # Пишем в ЧУЖОЙ файл вне экспорта — значит отказ возможен и не должен ронять
+    # уже созданный экспорт. Ведём себя как проверка git: сообщаем и продолжаем.
+    try:
+        with target.open("a", encoding="utf-8") as handle:
+            if existing and not existing.endswith("\n"):
+                handle.write("\n")
+            handle.write(block)
+    except OSError as exc:
+        return (f"⚠️ не удалось дописать в {target.name}: {exc.strerror or exc}. "
+                "Пропиши архив вручную, иначе сессии его не найдут")
     return f"архив прописан в {target.name} — сессии его увидят на старте"
 
 
@@ -259,6 +270,9 @@ def add_meta_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source", choices=SOURCES, required=True)
     parser.add_argument("--origin", default="", help="откуда физически взято")
     parser.add_argument("--fidelity", choices=FIDELITIES, required=True)
+    parser.add_argument("--attribution", choices=ATTRIBUTIONS, default="reliable",
+                        help="надёжность авторства (§4а): копипаста из мессенджера — "
+                             "всегда forwarder-shown")
     parser.add_argument("--note", default=None, help="fidelity_note; обязателен если fidelity != verbatim")
     parser.add_argument("--date", default=None, help="дата материала YYYY-MM-DD (по умолчанию сегодня)")
     parser.add_argument("--participants", default="", help="через запятую")
@@ -274,6 +288,7 @@ def meta_from_args(args) -> dict:
         "origin": args.origin,
         "fidelity": args.fidelity,
         "fidelity_note": args.note,
+        "attribution": args.attribution,
         "date": parse_day(args.date) if args.date else today(),
         "participants": [p.strip() for p in args.participants.split(",") if p.strip()],
         "tags": [t.strip() for t in args.tags.split(",") if t.strip()],
@@ -311,7 +326,7 @@ def cmd_init(args) -> int:
     # стандарта). Порядок здесь — не стилистика: наоборот было бы окном, в
     # котором рабочий материал уже лежит в отслеживаемом каталоге.
     git_note = exclude_from_git(export)
-    claude_note = announce_in_claude_md(export)
+    claude_note = announce_in_claude_md(export, manifest["export"]["slug"])
 
     # Собираем производные сразу: пустой, но валидный экспорт лучше «почти
     # созданного», на котором линтер падает по V07.
@@ -570,10 +585,16 @@ def cmd_req(args) -> int:
         record = next((r for r in manifest["requirements"] if r["id"] == args.id), None)
         if record is None:
             raise MnemoError(f"нет требования {args.id}")
-        for field in ("state", "evidence", "blocking", "blocking_since", "stage", "note"):
+        # Обновляем всё, что человек передал. Раньше цикл читал только часть
+        # полей, и `--quote` при исправлении опечатки молча терялся: команда
+        # отвечала успехом, а в манифесте оставалась старая формулировка.
+        for field in ("quote", "wanted_by", "state", "evidence", "blocking",
+                      "blocking_since", "stage", "supersedes", "note", "date"):
             value = getattr(args, field, None)
             if value is not None:
                 record[field] = value
+        if args.based_on:
+            record["based_on"] = [b.strip() for b in args.based_on.split(",") if b.strip()]
         new_requirement(**record)  # перепроверка контракта после правки
         save_manifest(export, manifest)
         print(f"{record['id']}  {record['state']}  {record['quote'][:56]}")
@@ -607,13 +628,17 @@ def cmd_ask(args) -> int:
             # Отметка «спросили» — накопительная: вопрос могли поднимать дважды,
             # и это разные события, а не перезапись одного.
             record["raised"].append({
-                "to": args.raised_to, "at": args.date or today(),
+                "to": args.raised_to, "at": args.raised_at or today(),
                 "where": args.where or "",
             })
-        for field in ("impact", "blocking", "blocking_since", "answered_by", "dropped_reason"):
+        for field in ("text", "impact", "blocking", "blocking_since", "asked_of",
+                      "answered_by", "dropped_reason", "date"):
             value = getattr(args, field, None)
             if value is not None:
                 record[field] = value
+        if args.based_on:
+            record["based_on"] = [b.strip() for b in args.based_on.split(",") if b.strip()]
+        new_question(**record)  # перепроверка контракта после правки
         save_manifest(export, manifest)
         print(f"{record['id']}  {question_state(record)}  {record['text'][:56]}")
         return 0
@@ -761,7 +786,9 @@ def cmd_show(args) -> int:
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
     if args.id:
-        print(json.dumps(find_item(manifest, args.id), ensure_ascii=False, indent=2))
+        bucket, record = find_record(manifest, args.id)
+        print(f"// {bucket}", file=sys.stderr)
+        print(json.dumps(record, ensure_ascii=False, indent=2))
     else:
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
     return 0
@@ -775,11 +802,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_init = sub.add_parser("init", help="создать скелет экспорта")
     p_init.add_argument("--dir", required=True)
-    p_init.add_argument("--slug", default=None)
-    p_init.add_argument("--title", default=None)
-    p_init.add_argument("--project", default=None)
-    p_init.add_argument("--contour", choices=CONTOURS, default="work")
-    p_init.add_argument("--participants", default="")
+    p_init.add_argument("--slug", default=None,
+                        help="устойчивый ключ экспорта, kebab-case; входит в ссылки ctx:<slug>#<id>")
+    p_init.add_argument("--title", default=None, help="человекочитаемое название")
+    p_init.add_argument("--project", default=None, help="slug проекта для фильтра")
+    p_init.add_argument("--contour", choices=CONTOURS, default="work",
+                        help="work — рабочее (по умолчанию); personal — личное; "
+                             "public — разрешено к публикации (§11)")
+    p_init.add_argument("--participants", default="",
+                        help="отображаемые имена через запятую; полноценный реестр "
+                             "заводится отдельно командой people")
     p_init.set_defaults(func=cmd_init)
 
     p_file = sub.add_parser("add-file", help="положить файл в RAW")
@@ -852,6 +884,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--asked-of", dest="asked_of", default=None)
     p_ask.add_argument("--based-on", dest="based_on", default="", help="ссылки через запятую")
     p_ask.add_argument("--raised-to", dest="raised_to", default=None, help="отметить, что спросили у ...")
+    p_ask.add_argument("--raised-at", dest="raised_at", default=None,
+                       help="когда спросили; по умолчанию сегодня")
     p_ask.add_argument("--where", default=None, help="где спросили: issue, дейлик, чат")
     p_ask.add_argument("--answered-by", dest="answered_by", default=None, help="ссылка на ответ")
     p_ask.add_argument("--dropped-reason", dest="dropped_reason", default=None)

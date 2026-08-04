@@ -19,7 +19,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.8"
+SPEC_VERSION = "1.9"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"
@@ -214,9 +214,23 @@ def find_export(start: Path) -> Path:
     for candidate in (current, *current.parents):
         if (candidate / MANIFEST_NAME).is_file():
             return candidate
+    # Поиск идёт ВВЕРХ, а экспорт обычно лежит НИЖЕ — в подкаталоге проекта.
+    # Поэтому из корня проекта поиск не находит ничего, и совет «сначала init»
+    # прямо вреден: послушавшись, получишь второй экспорт. Ищем и вниз, чтобы
+    # подсказать конкретный путь.
+    nearby = sorted(
+        p.parent for p in current.glob(f"*/{MANIFEST_NAME}")
+    ) + sorted(p.parent for p in current.glob(f"*/*/{MANIFEST_NAME}"))
+    if nearby:
+        found = ", ".join(str(p.relative_to(current)) for p in nearby[:3])
+        raise MnemoError(
+            f"экспорт не найден вверх от {current}, но рядом есть: {found}. "
+            f"Укажи --export {nearby[0].relative_to(current)}"
+        )
     raise MnemoError(
-        f"не нашёл экспорт (нет {MANIFEST_NAME}) начиная от {start}. "
-        "Сначала /mnemo:init"
+        f"экспорт не найден: искал {MANIFEST_NAME} вверх от {current}. "
+        "Если экспорт лежит в подкаталоге — укажи --export <путь>. "
+        "Если его нет вовсе — /mnemo:init"
     )
 
 
@@ -475,6 +489,8 @@ def new_requirement(**kwargs: Any) -> dict:
         raise MnemoError(f"state должен быть одним из {REQUIREMENT_STATES}")
     if not str(record["quote"]).strip():
         raise MnemoError("quote обязателен: дословно, как было сказано")
+    if record.get("blocking_since"):
+        parse_day(record["blocking_since"])
     if record["state"] in ("done", "verified") and not (record["evidence"] or "").strip():
         # «Сделано» без доказательства — это мнение, а не отчёт. Ровно тот случай,
         # ради которого весь архив и заводился.
@@ -511,6 +527,12 @@ def new_question(**kwargs: Any) -> dict:
     }
     if not str(record["text"]).strip():
         raise MnemoError("text обязателен")
+    if record.get("blocking_since"):
+        parse_day(record["blocking_since"])
+    if record.get("answered_by") == record["id"]:
+        # Вопрос, отвечающий сам на себя, проходил бы как закрытый: его id есть
+        # в множестве известных, и ссылка формально «ведёт в существующее».
+        raise MnemoError(f"{record['id']}: вопрос не может отвечать сам на себя")
     parse_day(record["date"])
     return record
 
@@ -554,6 +576,32 @@ def days_blocked(record: dict, on: str | None = None) -> int | None:
 def superseded_ids(manifest: dict, bucket: str = "requirements") -> set[str]:
     """Идентификаторы, отменённые более поздними записями."""
     return {r["supersedes"] for r in manifest.get(bucket, []) if r.get("supersedes")}
+
+
+def supersede_cycles(manifest: dict, bucket: str = "requirements") -> list[list[str]]:
+    """Циклы в цепочках отмены.
+
+    Взаимная отмена «A отменяет B, B отменяет A» помечает отменёнными обе
+    записи, и обе исчезают из живых — без единой ошибки. Материал цел, но из
+    отчёта пропадает содержательное требование, а это то же молчаливое
+    исчезновение, только на уровне видимости.
+    """
+    nxt = {r["id"]: r.get("supersedes") for r in manifest.get(bucket, []) if r.get("id")}
+    found: list[list[str]] = []
+    seen_global: set[str] = set()
+    for start in nxt:
+        if start in seen_global:
+            continue
+        path, node = [], start
+        while node and node in nxt and node not in path:
+            path.append(node)
+            node = nxt[node]
+        if node and node in path:
+            cycle = path[path.index(node):]
+            if not any(set(cycle) == set(c) for c in found):
+                found.append(cycle)
+            seen_global.update(path)
+    return found
 
 
 def new_redaction(**kwargs: Any) -> dict:
@@ -652,11 +700,28 @@ def imported_keys(manifest: dict) -> set[str]:
     return keys
 
 
+RECORD_BUCKETS = ("items", "requirements", "questions", "redactions", "people")
+
+
+def find_record(manifest: dict, record_id: str) -> tuple[str, dict]:
+    """Запись любого вида по идентификатору.
+
+    Раньше поиск умел только материалы, поэтому `show --id t001` отвечал «нет
+    item с таким id», хотя требование существовало: сообщение было не просто
+    бесполезным, а вводящим в заблуждение.
+    """
+    for bucket in RECORD_BUCKETS:
+        for record in manifest.get(bucket, []):
+            if record.get("id") == record_id:
+                return bucket, record
+    raise MnemoError(f"нет записи с id={record_id}")
+
+
 def find_item(manifest: dict, item_id: str) -> dict:
     for item in manifest["items"]:
         if item["id"] == item_id:
             return item
-    raise MnemoError(f"нет item с id={item_id}")
+    raise MnemoError(f"нет материала с id={item_id}")
 
 
 def all_tracked_paths(manifest: dict) -> set[str]:

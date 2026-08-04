@@ -20,8 +20,9 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    INDEX_NAME, MnemoError, find_export, load_manifest, required_spec,
-    resolve_person, save_manifest, sha256_file,
+    INDEX_NAME, MnemoError, days_blocked, find_export, load_manifest,
+    question_state, required_spec, resolve_person, save_manifest, sha256_file,
+    superseded_ids,
 )
 
 GENERATED_NOTE = (
@@ -204,6 +205,45 @@ def render_index(manifest: dict) -> str:
                              f"`{item['fidelity']}`{suffix}")
                 for derived in item["derived_paths"]:
                     lines.append(f"  - производное: [`{derived}`]({_url(derived)})")
+            lines.append("")
+
+    # --- требования и вопросы --------------------------------------------
+    # §1: экспорт самодостаточен и читается без инструмента. Слой «что от нас
+    # хотят» существовал только в выводе `audit` — открывший каталог его не
+    # видел вовсе.
+    reqs = manifest.get("requirements", [])
+    quests = manifest.get("questions", [])
+    if reqs or quests:
+        dead = superseded_ids(manifest)
+        lines += ["## Требования и вопросы", "",
+                  "Полная сводка с ответом «всё ли сделано» — команда `/mnemo:audit`.", ""]
+        if reqs:
+            lines += ["| Состояние | Требование | Кто хочет | Подтверждено | id |",
+                      "|---|---|---|---|---|"]
+            for r in sorted(reqs, key=lambda x: (x.get("state", ""), x.get("date", ""))):
+                # Та же устойчивость, что у audit: повреждённая запись должна
+                # быть видна в индексе, а не исчезнуть из него.
+                state = r.get("state") or "<без состояния>"
+                if r.get("id") in dead:
+                    state += " (отменено)"
+                lines.append(
+                    f"| {state} | {_escape(str(r.get('quote') or '<без формулировки>')[:64])} | "
+                    f"{_escape(r.get('wanted_by') or '—')} | "
+                    f"{_escape(r.get('evidence') or '—')} | `{r.get('id')}` |")
+            lines.append("")
+        if quests:
+            lines += ["| Состояние | Вопрос | Блокирует | Спрошено | id |",
+                      "|---|---|---|---|---|"]
+            for q in sorted(quests, key=lambda x: x.get("date", "")):
+                raised = q.get("raised") or []
+                asked = f"{raised[-1].get('at')} → {raised[-1].get('to')}" if raised else "нет"
+                age = days_blocked(q)
+                block = _escape(q.get("blocking") or "—")
+                if age and age > 0:
+                    block += f" ({age} дн.)"
+                lines.append(
+                    f"| {question_state(q)} | {_escape(str(q.get('text') or '<без текста>')[:56])} | "
+                    f"{block} | {_escape(asked)} | `{q.get('id')}` |")
             lines.append("")
 
     # --- хвосты ----------------------------------------------------------
