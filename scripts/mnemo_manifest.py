@@ -33,7 +33,8 @@ from mnemo_core import (  # noqa: E402
     RAW_ZONES, REDACTION_REASONS,
     SOURCES, STATUSES, MnemoError, ensure_skeleton, empty_manifest, find_export,
     contained, find_item, load_manifest, message_filename, new_item, new_person,
-    new_question, new_redaction, new_requirement, next_id, question_state,
+    blocked_since, new_question, new_redaction, new_requirement, next_id,
+    question_state,
     parse_day, rel, resolve_person, save_manifest, sha256_file, slugify, today,
 )
 
@@ -569,7 +570,7 @@ def cmd_req(args) -> int:
         record = next((r for r in manifest["requirements"] if r["id"] == args.id), None)
         if record is None:
             raise MnemoError(f"нет требования {args.id}")
-        for field in ("state", "evidence", "blocking", "stage", "note"):
+        for field in ("state", "evidence", "blocking", "blocking_since", "stage", "note"):
             value = getattr(args, field, None)
             if value is not None:
                 record[field] = value
@@ -584,6 +585,7 @@ def cmd_req(args) -> int:
         id=next_id(manifest, "requirement"), quote=args.quote,
         wanted_by=args.wanted_by, based_on=[b.strip() for b in (args.based_on or "").split(",") if b.strip()],
         state=args.state or "stated", evidence=args.evidence, blocking=args.blocking,
+        blocking_since=args.blocking_since,
         stage=args.stage, supersedes=args.supersedes, note=args.note, date=args.date,
     )
     manifest["requirements"].append(record)
@@ -608,7 +610,7 @@ def cmd_ask(args) -> int:
                 "to": args.raised_to, "at": args.date or today(),
                 "where": args.where or "",
             })
-        for field in ("impact", "blocking", "answered_by", "dropped_reason"):
+        for field in ("impact", "blocking", "blocking_since", "answered_by", "dropped_reason"):
             value = getattr(args, field, None)
             if value is not None:
                 record[field] = value
@@ -620,7 +622,7 @@ def cmd_ask(args) -> int:
         raise MnemoError("--text обязателен")
     record = new_question(
         id=next_id(manifest, "question"), text=args.text, impact=args.impact,
-        blocking=args.blocking, asked_of=args.asked_of,
+        blocking=args.blocking, blocking_since=args.blocking_since, asked_of=args.asked_of,
         based_on=[b.strip() for b in (args.based_on or "").split(",") if b.strip()],
         date=args.date,
     )
@@ -830,6 +832,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_req.add_argument("--based-on", dest="based_on", default="", help="ссылки через запятую")
     p_req.add_argument("--state", choices=REQUIREMENT_STATES, default=None)
     p_req.add_argument("--evidence", default=None, help="чем подтверждено (для done/verified)")
+    p_req.add_argument("--blocking-since", dest="blocking_since", default=None,
+                        help="с какого числа блокирует; по умолчанию дата записи")
     p_req.add_argument("--blocking", default=None, help="что стоит без этого")
     p_req.add_argument("--stage", default=None, help="к какому этапу относится")
     p_req.add_argument("--supersedes", default=None, help="какое требование отменяет")
@@ -842,6 +846,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--id", default=None, help="обновить существующий")
     p_ask.add_argument("--text", default=None)
     p_ask.add_argument("--impact", default=None, help="что меняется от ответа")
+    p_ask.add_argument("--blocking-since", dest="blocking_since", default=None,
+                        help="с какого числа блокирует; по умолчанию дата записи")
     p_ask.add_argument("--blocking", default=None, help="что стоит без ответа")
     p_ask.add_argument("--asked-of", dest="asked_of", default=None)
     p_ask.add_argument("--based-on", dest="based_on", default="", help="ссылки через запятую")

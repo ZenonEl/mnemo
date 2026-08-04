@@ -96,7 +96,7 @@ git clone https://github.com/ZenonEl/mnemo ~/.claude/plugins/mnemo
 
 ## Стандарт
 
-- [`SPEC/STANDARD.md`](SPEC/STANDARD.md) — раскладка, контракт `item`, правила (версия 1.7)
+- [`SPEC/STANDARD.md`](SPEC/STANDARD.md) — раскладка, контракт `item`, правила (версия 1.8)
 - [`SPEC/PROVENANCE.md`](SPEC/PROVENANCE.md) — модель достоверности и правила цитирования
 - [`SPEC/CITATION.md`](SPEC/CITATION.md) — формат ссылок `ctx:<slug>#<id>`
 - [`SPEC/CHANGELOG.md`](SPEC/CHANGELOG.md) — версии

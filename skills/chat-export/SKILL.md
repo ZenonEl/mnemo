@@ -45,6 +45,7 @@ description: "Use when capturing work context into a durable, citable archive �
 | `mnemo_extract.py` | текст и вшитые картинки из `.docx` / `.xlsx` |
 | `mnemo_render.py` | пересборка `INDEX.md` и `summaries/redactions.md` |
 | `mnemo_verify.py` | линтер V01–V20 |
+| `mnemo_selfcheck.py` | согласованность самого плагина: версии, правила, префиксы |
 | `mnemo_audit.py` | сводка «всё ли сделано как хотели» |
 | `mnemo_publish.py` | публичный срез: детерминированный отбор по контуру |
 

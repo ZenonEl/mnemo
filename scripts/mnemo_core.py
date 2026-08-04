@@ -19,7 +19,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.7"
+SPEC_VERSION = "1.8"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"
@@ -465,6 +465,7 @@ def new_requirement(**kwargs: Any) -> dict:
         "state": kwargs.get("state", "stated"),
         "evidence": kwargs.get("evidence"),
         "blocking": kwargs.get("blocking"),
+        "blocking_since": kwargs.get("blocking_since"),
         "stage": kwargs.get("stage"),
         "supersedes": kwargs.get("supersedes"),
         "note": kwargs.get("note"),
@@ -500,6 +501,7 @@ def new_question(**kwargs: Any) -> dict:
         "text": kwargs["text"],
         "impact": kwargs.get("impact"),
         "blocking": kwargs.get("blocking"),
+        "blocking_since": kwargs.get("blocking_since"),
         "asked_of": kwargs.get("asked_of"),
         "based_on": _dedupe(kwargs.get("based_on")),
         "raised": list(kwargs.get("raised") or []),
@@ -522,6 +524,31 @@ def question_state(record: dict) -> str:
     if record.get("raised"):
         return "raised"
     return "open"
+
+
+def blocked_since(record: dict) -> str | None:
+    """С какого числа запись блокирует работу.
+
+    Нужно для вопроса «что висит третий день» — без даты «заблокировано» это
+    просто флаг, и понять, что застряло надолго, нельзя.
+
+    Явное `blocking_since` важнее вывода: блокировка часто появляется позже
+    самой записи (вопрос завели спокойным, он стал блокирующим через два дня),
+    и тогда возраст от даты создания завышен. Если поля нет — берём дату
+    записи как приближение, потому что запись, заведённая уже блокирующей,
+    блокирует с рождения.
+    """
+    if not record.get("blocking"):
+        return None
+    return record.get("blocking_since") or record.get("date")
+
+
+def days_blocked(record: dict, on: str | None = None) -> int | None:
+    since = blocked_since(record)
+    if not since:
+        return None
+    ref = datetime.strptime(on or today(), "%Y-%m-%d").date()
+    return (ref - datetime.strptime(since, "%Y-%m-%d").date()).days
 
 
 def superseded_ids(manifest: dict, bucket: str = "requirements") -> set[str]:

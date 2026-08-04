@@ -30,8 +30,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    MnemoError, find_export, load_manifest, question_state, resolve_person,
-    superseded_ids,
+    MnemoError, days_blocked, find_export, load_manifest, question_state,
+    resolve_person, superseded_ids,
 )
 
 STATE_MARK = {
@@ -55,15 +55,18 @@ def collect(manifest: dict) -> dict:
         reqs.append({**record, "superseded": record["id"] in dead})
     questions = [{**q, "state": question_state(q)} for q in manifest.get("questions", [])]
 
-    # Порядок: блокирующее вперёд, затем незакрытое, затем по дате. Ровно то,
+    # Порядок: блокирующее вперёд, среди блокирующего — давнее вперёд, затем
+    # незакрытое, затем по дате. «Висит третий день» должно быть видно сверху. Ровно то,
     # чего не хватало, когда сводка возвращала важное вперемешку с неважным.
     def req_key(r):
         return (0 if r.get("blocking") else 1,
+                -(days_blocked(r) or 0),
                 {"stated": 0, "accepted": 1, "done": 2, "verified": 3, "dropped": 4}[r["state"]],
                 r["date"])
 
     def q_key(q):
         return (0 if q.get("blocking") else 1,
+                -(days_blocked(q) or 0),
                 {"open": 0, "raised": 1, "answered": 2, "dropped": 3}[q["state"]],
                 q["date"])
 
@@ -96,13 +99,17 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
     if blocking_r or blocking_q:
         out += ["━━━ БЕЗ ЭТОГО РАБОТА СТОИТ ━━━", ""]
         for r in blocking_r:
-            out.append(f"  {r['id']}  «{r['quote'][:70]}»")
+            age = days_blocked(r)
+            tail = f"  ({age} дн.)" if age is not None and age > 0 else ""
+            out.append(f"  {r['id']}  «{r['quote'][:70]}»{tail}")
             out.append(f"       стоит: {r['blocking']}")
             out.append(f"       хочет: {who(manifest, r.get('wanted_by'))}"
                        + (f" · {', '.join(r['based_on'])}" if r.get("based_on") else ""))
         for q in blocking_q:
             mark = "уже спрашивали" if q["raised"] else "НЕ СПРАШИВАЛИ"
-            out.append(f"  {q['id']}  {q['text'][:70]}")
+            age = days_blocked(q)
+            tail = f"  ({age} дн.)" if age is not None and age > 0 else ""
+            out.append(f"  {q['id']}  {q['text'][:70]}{tail}")
             out.append(f"       стоит: {q['blocking']}   [{mark}]")
             if q.get("impact"):
                 out.append(f"       от ответа зависит: {q['impact'][:70]}")
