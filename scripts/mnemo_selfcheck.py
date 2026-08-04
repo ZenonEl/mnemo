@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -32,6 +33,45 @@ from mnemo_core import SPEC_VERSION  # noqa: E402
 
 VERSION_RE = re.compile(r"^\*\*Версия стандарта:\*\*\s*([\d.]+)", re.M)
 RULE_RE = re.compile(r"\bV(\d{2})\b")
+
+
+PRIVATE_TERMS = Path.home() / ".config" / "mnemo" / "private-terms.txt"
+
+
+def check_private_terms(root: Path) -> list[str]:
+    """Настоящие имена в файлах, которые уедут в публичный репозиторий.
+
+    Смотрим рабочее дерево, а не историю: попавшее в коммит убирается только
+    переписыванием истории, и смысл проверки — не доводить до этого.
+    """
+    source = Path(os.environ.get("MNEMO_PRIVATE_TERMS") or PRIVATE_TERMS)
+    if not source.is_file():
+        return []
+    terms = [line.strip() for line in source.read_text(encoding="utf-8").splitlines()
+             if line.strip() and not line.startswith("#")]
+    if not terms:
+        return []
+
+    listing = subprocess.run(["git", "-C", str(root), "ls-files"],
+                             capture_output=True, text=True)
+    if listing.returncode != 0:
+        return ["список запрещённых слов задан, но git не отдал список файлов — "
+                "проверка не выполнена"]
+
+    problems = []
+    for name in listing.stdout.splitlines():
+        path = root / name
+        try:
+            text = path.read_text(encoding="utf-8").lower()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for term in terms:
+            if term.lower() in text:
+                problems.append(
+                    f"{name}: настоящее имя «{term}» — репозиторий публичный, "
+                    "примеры обязаны быть обезличенными (CONTRIBUTING.md)"
+                )
+    return problems
 
 
 def check(root: Path) -> list[str]:
@@ -142,6 +182,14 @@ def check(root: Path) -> list[str]:
         for ref in re.findall(r"§(\d+)", source.read_text(encoding="utf-8")):
             if ref not in sections:
                 problems.append(f"{source.name} ссылается на §{ref}, которого нет в STANDARD.md")
+
+    # 3а. Настоящие имена в публичной репе.
+    #
+    # Список лежит вне репозитория намеренно: перечень имён клиентов и людей,
+    # положенный рядом с кодом, сам был бы утечкой — причём той же, от которой
+    # защищает. Нет файла — проверка молча пропускается, и на посторонних
+    # установках ничего не меняется.
+    problems += check_private_terms(root)
 
     # 4. Команды: файл на каждую и версия плагина совпадает с манифестом рынка.
     plugin = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
