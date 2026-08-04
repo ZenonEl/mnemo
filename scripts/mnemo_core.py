@@ -19,7 +19,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.11"
+SPEC_VERSION = "1.12"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"

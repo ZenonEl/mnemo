@@ -17,7 +17,7 @@
     ask         открытый вопрос: чего мы не знаем
     people      реестр людей: кто есть кто
     whois       опознать имя из источника
-    show        показать манифест или отдельную запись
+    show        показать манифест или отдельную запись (отладка, не контракт)
 """
 
 from __future__ import annotations
@@ -982,7 +982,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_who.add_argument("name")
     p_who.set_defaults(func=cmd_whois)
 
-    p_show = sub.add_parser("show", help="показать манифест")
+    p_show = sub.add_parser(
+        "show", help="показать манифест — отладочный просмотр, не контракт "
+                     "чтения; для интеграции см. audit --json и SPEC/QUERY.md")
     p_show.add_argument("--export", default=".")
     p_show.add_argument("--id", default=None)
     p_show.set_defaults(func=cmd_show)

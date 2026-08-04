@@ -18,7 +18,11 @@
 Использование:
     mnemo_audit.py --export <dir>
     mnemo_audit.py --export <dir> --open-only     только незакрытое
-    mnemo_audit.py --export <dir> --json
+    mnemo_audit.py --export <dir> --json          контракт чтения, SPEC/QUERY.md
+
+`--json` — единственная поддерживаемая точка входа для сторонних инструментов.
+Форма вывода нормативна и версионируется (`SPEC/QUERY.md`); всё остальное —
+внутреннее устройство, на которое опираться нельзя.
 """
 
 from __future__ import annotations
@@ -30,9 +34,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    MnemoError, days_blocked, find_export, load_manifest, question_state,
-    resolve_person, superseded_ids,
+    SPEC_VERSION, MnemoError, blocked_since, days_blocked, find_export,
+    load_manifest, question_state, resolve_person, superseded_ids,
 )
+
+# Версия контракта чтения — своя, не версия стандарта: формат вывода может
+# устояться раньше, чем формат манифеста, и наоборот. Нормативное описание —
+# SPEC/QUERY.md, правила совместимости — STANDARD.md §14.
+QUERY_CONTRACT = "1"
 
 STATE_MARK = {
     "verified": "✅", "done": "☑️", "accepted": "⏳",
@@ -79,6 +88,17 @@ Q_DEFAULTS = {"text": "<без текста>", "date": "1970-01-01", "raised": [
               "impact": None, "answered_by": None, "asked_of": None, "id": "?"}
 
 
+def derived(record: dict) -> dict:
+    """Выведенное состояние — рядом с записью, а не только в порядке сортировки.
+
+    Раньше «висит третий день» существовало лишь как ключ сортировки, и любой
+    сторонний потребитель был вынужден заново написать `blocked_since` вместе с
+    его правилом отката на дату записи. Два места, где вычисляется одно и то же,
+    расходятся — поэтому вывод отдаётся готовым.
+    """
+    return {"blocked_since": blocked_since(record), "days_blocked": days_blocked(record)}
+
+
 def collect(manifest: dict) -> dict:
     # Манифест могли править руками или сторонним кодом. Сводка обязана
     # показать повреждённую запись, а не упасть на ней: падение прячет и все
@@ -89,8 +109,8 @@ def collect(manifest: dict) -> dict:
         full = {**REQ_DEFAULTS, **record}
         if full["state"] not in ("stated", "accepted", "done", "verified", "dropped"):
             full["state"] = "stated"
-        reqs.append({**full, "superseded": full["id"] in dead})
-    questions = [{**Q_DEFAULTS, **q, "state": question_state(q)}
+        reqs.append({**full, "superseded": full["id"] in dead, **derived(full)})
+    questions = [{**Q_DEFAULTS, **q, "state": question_state(q), **derived(q)}
                  for q in manifest.get("questions", [])]
 
     # Порядок: блокирующее вперёд, среди блокирующего — давнее вперёд, затем
@@ -237,7 +257,22 @@ def main() -> int:
         return 1
 
     if args.json:
-        print(json.dumps(data, ensure_ascii=False, indent=2))
+        if args.open_only:
+            data = {
+                "requirements": [r for r in data["requirements"]
+                                 if not r["superseded"] and r["state"] in ("stated", "accepted")],
+                "questions": [q for q in data["questions"] if q["state"] in ("open", "raised")],
+            }
+        meta = manifest["export"]
+        print(json.dumps({
+            "query_contract": QUERY_CONTRACT,
+            "mnemo_spec": manifest.get("mnemo_spec", SPEC_VERSION),
+            # slug нужен потребителю, чтобы собрать `ctx:<slug>#<id>`. Без него
+            # ссылку не построить, и он полез бы за ней в манифест — ровно то,
+            # чего контракт чтения должен избавить.
+            "export": {"slug": meta.get("slug"), "title": meta.get("title")},
+            **data,
+        }, ensure_ascii=False, indent=2))
     else:
         print("\n".join(report(manifest, data, args.open_only)))
     return 0

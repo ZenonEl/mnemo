@@ -58,6 +58,25 @@ def check(root: Path) -> list[str]:
             f"а SPEC_VERSION в коде — {SPEC_VERSION}"
         )
 
+    # 1а. Версия контракта чтения — тот же класс дрейфа, только своя шкала.
+    # Она версионируется отдельно от стандарта (§16), значит и разойтись может
+    # отдельно: код отдаёт одну, документ обещает другую, потребитель проверяет
+    # major-версию и получает неверный ответ.
+    query_doc = spec / "QUERY.md"
+    audit = (root / "scripts" / "mnemo_audit.py").read_text(encoding="utf-8")
+    in_code = re.search(r'^QUERY_CONTRACT = "([^"]+)"', audit, re.M)
+    in_doc = re.search(r"^\*\*Версия контракта чтения:\*\*\s*`([^`]+)`",
+                       query_doc.read_text(encoding="utf-8"), re.M) if query_doc.is_file() else None
+    if not query_doc.is_file():
+        problems.append("SPEC/QUERY.md отсутствует, а §16 объявляет контракт чтения")
+    elif not in_code or not in_doc:
+        problems.append("версия контракта чтения не объявлена в коде или в QUERY.md")
+    elif in_code.group(1) != in_doc.group(1):
+        problems.append(
+            f"контракт чтения: код отдаёт {in_code.group(1)}, "
+            f"QUERY.md обещает {in_doc.group(1)}"
+        )
+
     # 2. Правила линтера: объявленные в стандарте и реализованные — одно и то же.
     standard = (spec / "STANDARD.md").read_text(encoding="utf-8")
     verifier = (root / "scripts" / "mnemo_verify.py").read_text(encoding="utf-8")
@@ -90,6 +109,23 @@ def check(root: Path) -> list[str]:
                 f"префикс `{declared}` описан в CITATION.md, но код его не выдаёт — "
                 "документ обещает ссылку, которой не бывает"
             )
+
+    # И третья сторона того же: примеры ссылок в тексте. Таблица префиксов может
+    # быть верной, а пример рядом с ней — показывать префикс, которого нет.
+    # Так и вышло: `d` убрали из таблицы, а `ctx:priyomka#d012` осталось строкой
+    # ниже — и читатель учится формату, который линтер отвергнет. Проверка
+    # таблиц этого не видит, потому что смотрит только на строки таблиц.
+    for source in [*sorted(spec.glob("*.md")), root / "README.md",
+                   *sorted((root / "commands").glob("*.md")),
+                   *sorted((root / "skills").rglob("*.md"))]:
+        for sample, prefix in set(re.findall(r"ctx:[\w-]+#(([a-z])\d+)",
+                                             source.read_text(encoding="utf-8"))):
+            if prefix not in prefixes:
+                problems.append(
+                    f"{source.name}: пример `#{sample}` использует префикс "
+                    f"`{prefix}`, которого нет — читатель научится ссылке, "
+                    "которой не бывает"
+                )
 
     # Команды: README перечисляет ровно то, что лежит в commands/.
     readme = (root / "README.md").read_text(encoding="utf-8")
