@@ -20,8 +20,8 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    INDEX_NAME, MnemoError, find_export, load_manifest, resolve_person,
-    save_manifest, sha256_file,
+    INDEX_NAME, MnemoError, find_export, load_manifest, required_spec,
+    resolve_person, save_manifest, sha256_file,
 )
 
 GENERATED_NOTE = (
@@ -308,7 +308,13 @@ def sync(export: Path, rehash: bool = True) -> dict:
                 item["sha256"] = sha256_file(path)
                 item["status"] = "present"
                 updated += 1
-        if updated:
+        # Приведение заявленной версии к фактическому содержимому — тоже
+        # производная величина, и место ей здесь: sync существует затем, чтобы
+        # то, что выводится из манифеста, ему соответствовало.
+        drifted = manifest.get("mnemo_spec") != required_spec(manifest) and \
+            tuple(int(x) for x in str(manifest.get("mnemo_spec", "1.0")).split(".")) < \
+            tuple(int(x) for x in required_spec(manifest).split("."))
+        if updated or drifted:
             save_manifest(export, manifest)
 
     (export / INDEX_NAME).write_text(render_index(manifest), encoding="utf-8")

@@ -86,14 +86,14 @@ git clone https://github.com/ZenonEl/mnemo ~/.claude/plugins/mnemo
 | `/mnemo:rule` | рабочее правило в `conventions` |
 | `/mnemo:redact` | зарегистрировать изъятие |
 | `/mnemo:sync` | пересобрать производные из манифеста |
-| `/mnemo:verify` | линтер: 17 правил стандарта |
+| `/mnemo:verify` | линтер: 18 правил стандарта |
 | `/mnemo:gaps` | чего не хватает и что утрачено |
 | `/mnemo:people` | реестр людей: связать имена одного человека из разных источников |
 | `/mnemo:publish` | публичный срез без рабочих данных |
 
 ## Стандарт
 
-- [`SPEC/STANDARD.md`](SPEC/STANDARD.md) — раскладка, контракт `item`, правила (версия 1.4)
+- [`SPEC/STANDARD.md`](SPEC/STANDARD.md) — раскладка, контракт `item`, правила (версия 1.6)
 - [`SPEC/PROVENANCE.md`](SPEC/PROVENANCE.md) — модель достоверности и правила цитирования
 - [`SPEC/CITATION.md`](SPEC/CITATION.md) — формат ссылок `ctx:<slug>#<id>`
 - [`SPEC/CHANGELOG.md`](SPEC/CHANGELOG.md) — версии

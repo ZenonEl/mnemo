@@ -27,7 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    CONTOURS, FIDELITIES, INDEX_NAME, MANIFEST_NAME, PERSON_ROLES, RAW_ZONES, REDACTION_REASONS,
+    CONTOURS, DEFAULT_EXPORT_DIR, FIDELITIES, INDEX_NAME, MANIFEST_NAME, PERSON_ROLES,
+    RAW_ZONES, REDACTION_REASONS,
     SOURCES, STATUSES, MnemoError, ensure_skeleton, empty_manifest, find_export,
     contained, find_item, load_manifest, message_filename, new_item, new_person,
     new_redaction, next_id,
@@ -263,6 +264,12 @@ def cmd_init(args) -> int:
     print(f"экспорт создан: {export}")
     print(f"  slug: {manifest['export']['slug']}")
     print(f"  git:  {git_note}")
+    if export.name != DEFAULT_EXPORT_DIR:
+        # Однократная подсказка при создании, а не правило линтера: принятые
+        # экспорты живут под историческими именами, и вечное предупреждение
+        # на них обесценило бы остальные проверки.
+        print(f"  имя:  рекомендуемое — `{DEFAULT_EXPORT_DIR}` "
+              f"(у тебя `{export.name}`; это не ошибка, только единообразие)")
     return 0
 
 

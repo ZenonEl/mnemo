@@ -44,7 +44,7 @@ description: "Use when capturing work context into a durable, citable archive �
 | `mnemo_import.py` | импорт источника целиком; формат определяется реестром парсеров |
 | `mnemo_extract.py` | текст и вшитые картинки из `.docx` / `.xlsx` |
 | `mnemo_render.py` | пересборка `INDEX.md` и `summaries/redactions.md` |
-| `mnemo_verify.py` | линтер V01–V17 |
+| `mnemo_verify.py` | линтер V01–V18 |
 | `mnemo_publish.py` | публичный срез: детерминированный отбор по контуру |
 
 У всех есть `--help`. Читай его, а не угадывай флаги.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Линтер стандарта: правила V01–V17 из SPEC/STANDARD.md §13.
+"""Линтер стандарта: правила V01–V18 из SPEC/STANDARD.md §13.
 
 Детерминированный, без участия модели. Линтер, работающий «на усмотрение», —
 не линтер: он не может подтвердить, что архив цел, а именно это от него нужно.
@@ -21,7 +21,7 @@ from mnemo_core import (  # noqa: E402
     ALLOWED_TOP, ATTRIBUTIONS, CONTOURS, FIDELITIES, INDEX_NAME, MANIFEST_NAME,
     PERSON_ROLES, REDACTION_REASONS, REQUIRED_FILES,
     SOURCES, STATUSES, MnemoError, all_tracked_paths, find_export, iter_raw_files,
-    load_manifest, parse_day, rel, sha256_file, unknown_names,
+    load_manifest, parse_day, rel, required_spec, sha256_file, unknown_names,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -214,6 +214,7 @@ def check(export: Path) -> Report:
             + " — непонятно, кто ведёт архив",
         )
     claimed: dict[str, str] = {}
+    handles_seen: dict[tuple[str, str], str] = {}
     for person in manifest.get("people", []):
         pid = person.get("id", "?")
         if pid in seen_people:
@@ -234,6 +235,33 @@ def check(export: Path) -> Report:
                     pid,
                 )
             claimed[key] = pid
+        # Один и тот же аккаунт у двух записей означает, что человек заведён
+        # дважды. Совпадения алиасов при этом может не быть вовсе — как у пары
+        # «Пётр Иванов» и его github-логина, — и без этой проверки дубль
+        # остаётся невидимым.
+        for kind, value in (person.get("handles") or {}).items():
+            key2 = (str(kind).lower(), str(value).strip().lower())
+            if not key2[1]:
+                continue
+            if key2 in handles_seen and handles_seen[key2] != pid:
+                report.error(
+                    "V16",
+                    f"{kind}: {value} заявлен и у {handles_seen[key2]} — "
+                    "один аккаунт не может принадлежать двум людям",
+                    pid,
+                )
+            handles_seen[key2] = pid
+
+    # V18 — заявленная версия не отстаёт от содержимого. Манифест, объявляющий
+    # 1.0 и содержащий разделы из 1.5, вводит в заблуждение любого читателя:
+    # он не ждёт того, что там лежит.
+    declared, needed = str(manifest.get("mnemo_spec", "1.0")), required_spec(manifest)
+    if tuple(int(x) for x in declared.split(".")) < tuple(int(x) for x in needed.split(".")):
+        report.error(
+            "V18",
+            f"заявлено mnemo_spec={declared}, но содержимое требует {needed} — "
+            "любая запись через инструмент поднимет версию",
+        )
 
     # V17 — на один файл ровно одна запись. Две записи на один путь означают,
     # что материалов в архиве меньше, чем он показывает: содержимое одного

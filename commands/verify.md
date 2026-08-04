@@ -8,7 +8,7 @@ description: Проверить экспорт на соответствие с�
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/mnemo_verify.py --export <dir>
 ```
 
-Правила V01–V17 описаны в `SPEC/STANDARD.md` §13. Покажи вывод человеку целиком.
+Правила V01–V18 описаны в `SPEC/STANDARD.md` §13. Покажи вывод человеку целиком.
 
 Как читать типовые ошибки:
 

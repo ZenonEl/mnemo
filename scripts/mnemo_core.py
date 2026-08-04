@@ -19,7 +19,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.5"
+SPEC_VERSION = "1.6"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"
@@ -51,6 +51,11 @@ RAW_ZONES = {
 
 EXTRACTED_DIR = "raw/attachments/_extracted-text"
 FROM_DOCX_DIR = "raw/screenshots/from-docx"
+
+# Рекомендуемое имя каталога экспорта. Не нормативное: приёмка принимает
+# экспорт под любым именем, и правило здесь давало бы вечное предупреждение
+# на каждом принятом каталоге с исторического названия.
+DEFAULT_EXPORT_DIR = "_chat-export"
 
 SUMMARY_DIR = "summaries"
 REQUIRED_SUMMARIES = (
@@ -239,6 +244,41 @@ def empty_manifest(slug: str, title: str, project: str | None = None,
     }
 
 
+# Раздел манифеста → версия стандарта, в которой он появился. Нужен, чтобы
+# заявленная версия не расходилась с содержимым: манифест, объявляющий 1.0 и
+# содержащий `retired`, вводит в заблуждение любого, кто его читает.
+SECTION_SINCE = (
+    ("imports", "1.1"),
+    ("people", "1.2"),
+    ("retired", "1.5"),
+)
+ITEM_FIELD_SINCE = (("attribution", "1.1"),)
+
+
+def _ver(value: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in str(value).split("."))
+    except ValueError:
+        return (0,)
+
+
+def required_spec(manifest: dict) -> str:
+    """Минимальная версия стандарта, которую манифест обязан объявлять.
+
+    Определяется по фактическому содержимому, а не по тому, что записано:
+    инструмент дописывает разделы в старые манифесты, и без этого версия
+    быстро перестаёт соответствовать формату.
+    """
+    need = (1, 0)
+    for section, since in SECTION_SINCE:
+        if manifest.get(section):
+            need = max(need, _ver(since))
+    for field, since in ITEM_FIELD_SINCE:
+        if any(field in item for item in manifest.get("items", [])):
+            need = max(need, _ver(since))
+    return ".".join(str(x) for x in need)
+
+
 def load_manifest(export: Path) -> dict:
     path = export / MANIFEST_NAME
     if not path.is_file():
@@ -274,6 +314,12 @@ def save_manifest(export: Path, manifest: dict) -> None:
     экспорт намеренно держится вне git, истории версий у него нет.
     `os.replace` в пределах одной файловой системы атомарен.
     """
+    # Поднимаем заявленную версию, если содержимое её переросло. Чинить дрейф
+    # в момент возникновения дешевле, чем ловить линтером годы спустя.
+    needed = required_spec(manifest)
+    if _ver(manifest.get("mnemo_spec", "1.0")) < _ver(needed):
+        manifest["mnemo_spec"] = needed
+
     path = export / MANIFEST_NAME
     payload = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
     tmp = path.with_name(f".{path.name}.tmp")
