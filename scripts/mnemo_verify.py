@@ -134,10 +134,10 @@ def check(export: Path) -> Report:
             report.warn("V08", "INDEX.md старше MANIFEST.json — выполни /mnemo:sync")
 
     # V09 — ссылки на изъятия существуют
-    for item in items:
-        for rid in item.get("redactions") or []:
+    for record in (items + manifest.get("requirements", []) + manifest.get("questions", [])):
+        for rid in record.get("redactions") or []:
             if rid not in redactions:
-                report.error("V09", f"ссылка на несуществующее изъятие {rid}", item["id"])
+                report.error("V09", f"ссылка на несуществующее изъятие {rid}", record.get("id", "?"))
 
     # V10 — идентификаторы и даты
     seen: set[str] = set()

@@ -141,24 +141,52 @@ def exclude_from_git(export: Path) -> str:
     exclude_file = git_home / "info" / "exclude"
     exclude_file.parent.mkdir(parents=True, exist_ok=True)
 
+    if "\n" in rule or "\r" in rule:
+        return ("⚠️ в имени каталога перевод строки — правило исключения выразить "
+                "нельзя. Переименуй каталог, иначе данные попадут в репозиторий")
+    # gitignore трактует [ ] * ? как шаблон, ! и # как служебные. Без
+    # экранирования `chat-export[1]` — обычное имя распакованной копии —
+    # превращается в шаблон, который не совпадает ни с чем: правило
+    # записывается, init рапортует «добавлено», а каталог не исключён.
+    escaped = "".join("\\" + ch if ch in "*?[]!#\\" else ch for ch in rule)
+
     existing = exclude_file.read_text(encoding="utf-8") if exclude_file.is_file() else ""
-    if f"/{rule}/" in existing or f"\n{rule}/" in existing:
+    if f"/{escaped}/" in existing:
         return "правило уже есть в .git/info/exclude"
     with exclude_file.open("a", encoding="utf-8") as handle:
         if existing and not existing.endswith("\n"):
             handle.write("\n")
         handle.write(f"# mnemo: экспорт содержит рабочие данные, в историю не попадает\n")
-        handle.write(f"/{rule}/\n")
+        handle.write(f"/{escaped}/\n")
     # Путь к exclude показываем как есть: в worktree и подмодуле он лежит вне
     # рабочего каталога, и вычислять относительный путь бессмысленно.
     try:
         shown = exclude_file.relative_to(root).as_posix()
     except ValueError:
         shown = str(exclude_file)
-    return f"добавлено в {shown}: /{rule}/"
+    if not is_git_ignored(export):
+        # Проверяем результат, а не факт записи: правило могло не сработать по
+        # причине, которой мы не предусмотрели. Рапорт «добавлено» без проверки —
+        # это обещание, а не гарантия.
+        return (f"⚠️ правило записано в {shown}, но каталог всё ещё не исключён. "
+                "Проверь вручную, иначе данные попадут в репозиторий")
+    return f"добавлено в {shown}: /{escaped}/"
 
 
 CLAUDE_MD_MARK = "<!-- mnemo:archive -->"
+
+
+def _safe_span(text: str) -> str:
+    """Имя, пригодное для вставки в чужой markdown.
+
+    Имя каталога уезжает в `CLAUDE.md`, который читает каждая сессия, и приходит
+    оно в том числе от третьих лиц: приёмка принимает каталоги вроде
+    `ChatExport_*` из клиентского архива. Бэктик закрывает code-span, перевод
+    строки выходит из него — и в файл с инструкциями для модели попадает
+    произвольный текст, выглядящий как её собственные правила.
+    """
+    flat = " ".join(str(text).split())
+    return flat.replace("`", "'")
 
 
 def announce_in_claude_md(export: Path, slug: str) -> str:
@@ -178,18 +206,30 @@ def announce_in_claude_md(export: Path, slug: str) -> str:
     """
     host = export.parent
     target = host / "CLAUDE.md"
+    if target.is_symlink():
+        # Дописывание пошло бы по ссылке — в файл вне проекта, о котором человек
+        # ничего не узнает.
+        return ("⚠️ CLAUDE.md — символическая ссылка, дописывать не буду: "
+                "запись ушла бы за пределы проекта. Пропиши архив вручную")
+    if target.exists() and not target.is_file():
+        return "⚠️ CLAUDE.md не обычный файл — пропиши архив вручную"
+
     existing = target.read_text(encoding="utf-8") if target.is_file() else ""
-    if CLAUDE_MD_MARK in existing:
+    # Метка своя у каждого экспорта: общая помечала файл как обработанный, и
+    # второй архив в том же проекте молча не объявлялся при рапорте «уже прописан».
+    mark = f"<!-- mnemo:archive:{slug} -->"
+    if mark in existing:
         return "уже прописан в CLAUDE.md"
 
-    name = export.name
+    name = _safe_span(export.name)
+    slug = _safe_span(slug)
     # Ссылка строится от СЛАГА, не от имени каталога. Раньше здесь стояло имя
     # каталога, и сгенерированный файл — первое, что читает свежая сессия, —
     # учил формату, которого нет в стандарте. Ссылки уезжают в issue и дейлики
     # и живут дольше архива, а линтер их не проверяет: тихая ошибка ровно того
     # класса, против которого проект и заведён.
     block = f"""
-{CLAUDE_MD_MARK}
+{mark}
 ## Архив контекста — `{name}/`
 
 Дословный архив материалов проекта с провенансом: переписка, документы, скрины,
@@ -339,6 +379,11 @@ def cmd_init(args) -> int:
     print(f"  slug: {manifest['export']['slug']}")
     print(f"  git:  {git_note}")
     print(f"  CLAUDE.md: {claude_note}")
+    if "прописан в CLAUDE.md" in claude_note and not is_git_ignored(export.parent / "CLAUDE.md"):
+        # CLAUDE.md — обычный файл проекта и попадает в коммит. В нём теперь
+        # стоит имя каталога экспорта, а оно часто совпадает с именем клиента.
+        print("             ⚠️ CLAUDE.md отслеживается git — имя каталога уедет "
+              "в историю репозитория. Проверь перед коммитом")
     if export.name != DEFAULT_EXPORT_DIR:
         # Однократная подсказка при создании, а не правило линтера: принятые
         # экспорты живут под историческими именами, и вечное предупреждение
@@ -497,7 +542,14 @@ def cmd_redact(args) -> int:
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
 
-    if args.vault_ref and contained(export, args.vault_ref) is not None:
+    # contained() отвергает абсолютные пути, возвращая None, — и проверка
+    # «не None» пропускала абсолютный путь внутрь экспорта. Резолвим сами.
+    vault_inside = False
+    if args.vault_ref:
+        candidate = Path(args.vault_ref).expanduser()
+        resolved = candidate if candidate.is_absolute() else (export / candidate)
+        vault_inside = resolved.resolve().is_relative_to(export.resolve())
+    if vault_inside:
         raise MnemoError(
             f"--vault-ref указывает внутрь экспорта: {args.vault_ref!r}. "
             "Изъятое и архив не хранятся вместе — иначе изъятие бессмысленно."
@@ -514,9 +566,13 @@ def cmd_redact(args) -> int:
     manifest["redactions"].append(record)
 
     for item_id in [i.strip() for i in (args.items or "").split(",") if i.strip()]:
-        item = find_item(manifest, item_id)
-        if record["id"] not in item["redactions"]:
-            item["redactions"].append(record["id"])
+        # Изъятие может касаться не только материала: дословная цитата
+        # требования содержит ровно те же данные, что и сообщение, из которого
+        # она взята, и печатается сводкой. Раньше `redact --items t001` падал.
+        _, target = find_record(manifest, item_id)
+        target.setdefault("redactions", [])
+        if record["id"] not in target["redactions"]:
+            target["redactions"].append(record["id"])
 
     save_manifest(export, manifest)
     from mnemo_render import sync
@@ -590,6 +646,13 @@ def cmd_req(args) -> int:
         # Обновляем всё, что человек передал. Раньше цикл читал только часть
         # полей, и `--quote` при исправлении опечатки молча терялся: команда
         # отвечала успехом, а в манифесте оставалась старая формулировка.
+        if args.state == "dropped" and not (args.note or record.get("note") or "").strip():
+            # Симметрично снятию материала и снятию вопроса: причина обязательна.
+            # Иначе блокирующее требование заказчика исчезает из отчёта молча.
+            raise MnemoError(
+                f"{record['id']}: снятие требования требует --note с причиной — "
+                "почему оно больше не действует"
+            )
         for field in ("quote", "wanted_by", "state", "evidence", "blocking",
                       "blocking_since", "stage", "supersedes", "note", "date"):
             value = getattr(args, field, None)

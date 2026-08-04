@@ -27,9 +27,14 @@ from mnemo_core import (  # noqa: E402
     MnemoError, find_export, load_manifest, save_manifest, today,
 )
 
-# Слои, которые выходят наружу всегда: они описывают порядок работы, а не
-# содержание переписки.
-ALWAYS_INCLUDED = ("summaries/conventions.md",)
+# Ничего не выходит наружу «всегда». Раньше сюда попадал `conventions.md` —
+# на том основании, что он описывает порядок работы, а не переписку. Но команда
+# `/mnemo:rule` прямо велит писать туда доступы и реквизиты, и в срез уезжала
+# строка вида `postgres://root:пароль@…` — при том что план о ней не сообщал,
+# а итоговая проверка смотрела только на материалы.
+#
+# Теперь это осознанный выбор человека, и он виден в плане.
+OPTIONAL_LAYERS = {"conventions": "summaries/conventions.md"}
 
 
 def select(manifest: dict) -> tuple[list[dict], list[dict]]:
@@ -39,7 +44,8 @@ def select(manifest: dict) -> tuple[list[dict], list[dict]]:
     return public, held
 
 
-def build(export: Path, out: Path, manifest: dict, public: list[dict]) -> dict:
+def build(export: Path, out: Path, manifest: dict, public: list[dict],
+          include_layers: tuple[str, ...] = ()) -> dict:
     stats = Counter()
     out.mkdir(parents=True, exist_ok=True)
 
@@ -64,7 +70,8 @@ def build(export: Path, out: Path, manifest: dict, public: list[dict]) -> dict:
                 shutil.copy2(found, copy_to)
                 stats["производных"] += 1
 
-    for relative in ALWAYS_INCLUDED:
+    for name in include_layers:
+        relative = OPTIONAL_LAYERS[name]
         found = export / relative
         if found.is_file():
             target = out / relative
@@ -104,6 +111,9 @@ def main() -> int:
     argp.add_argument("--export", default=".")
     argp.add_argument("--out", required=True, help="куда сложить срез (пустой каталог)")
     argp.add_argument("--apply", action="store_true", help="выполнить (иначе только план)")
+    argp.add_argument("--include", action="append", default=[], choices=sorted(OPTIONAL_LAYERS),
+                      help="дополнительный слой наружу; conventions содержит доступы "
+                           "и реквизиты — проверь глазами перед включением")
     args = argp.parse_args()
 
     try:
@@ -127,6 +137,14 @@ def main() -> int:
             print(f"\nизъятий в архиве: {len(manifest['redactions'])} — наружу не идут")
         if manifest.get("people"):
             print(f"реестр людей: {len(manifest['people'])} — наружу не идёт")
+        for name, relative in OPTIONAL_LAYERS.items():
+            if not (export / relative).is_file():
+                continue
+            if name in args.include:
+                print(f"\n⚠️ ВЫЙДЕТ НАРУЖУ по твоему выбору: {relative}")
+                print("   Он может содержать доступы и реквизиты — прочти его глазами.")
+            else:
+                print(f"\n{relative} остаётся закрытым (включить: --include {name})")
 
         if not public:
             print("\nНичего с contour: public — публиковать нечего.")
@@ -147,7 +165,7 @@ def main() -> int:
         if out.exists() and any(out.iterdir()):
             raise MnemoError(f"{out} не пуст — укажи пустой каталог")
 
-        stats = build(export, out, manifest, public)
+        stats = build(export, out, manifest, public, tuple(args.include))
         print("\n--- собрано ---")
         for key, count in sorted(stats.items()):
             print(f"  {key}: {count}")

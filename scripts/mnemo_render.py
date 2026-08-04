@@ -227,7 +227,7 @@ def render_index(manifest: dict) -> str:
                 if r.get("id") in dead:
                     state += " (отменено)"
                 lines.append(
-                    f"| {state} | {_escape(str(r.get('quote') or '<без формулировки>')[:64])} | "
+                    f"| {state} | {_escape(('‹изъято›' if r.get('redactions') else str(r.get('quote') or '<без формулировки>'))[:64])} | "
                     f"{_escape(r.get('wanted_by') or '—')} | "
                     f"{_escape(r.get('evidence') or '—')} | `{r.get('id')}` |")
             lines.append("")
@@ -242,7 +242,7 @@ def render_index(manifest: dict) -> str:
                 if age and age > 0:
                     block += f" ({age} дн.)"
                 lines.append(
-                    f"| {question_state(q)} | {_escape(str(q.get('text') or '<без текста>')[:56])} | "
+                    f"| {question_state(q)} | {_escape(('‹изъято›' if q.get('redactions') else str(q.get('text') or '<без текста>'))[:56])} | "
                     f"{block} | {_escape(asked)} | `{q.get('id')}` |")
             lines.append("")
 

@@ -41,6 +41,21 @@ STATE_MARK = {
 Q_MARK = {"open": "❓", "raised": "📨", "answered": "✅", "dropped": "✖️"}
 
 
+MASK = "‹изъято›"
+
+
+def visible(record: dict, field: str) -> str:
+    """Текст записи или заглушка, если он изъят.
+
+    Изъятие вырезает данные из материала, но дословная цитата требования несёт
+    те же самые данные и печатается сводкой. Пока цитату нечем было изъять,
+    механизм закрывал сообщение и оставлял его копию рядом.
+    """
+    if record.get("redactions"):
+        return MASK
+    return str(record.get(field) or "")
+
+
 def cut(text: str, limit: int) -> str:
     """Обрезать по границе слова: «всё в »» с висящей кавычкой читается плохо."""
     text = " ".join(str(text).split())
@@ -129,7 +144,7 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
         for r in blocking_r:
             age = days_blocked(r)
             tail = f"  ({age} дн.)" if age is not None and age > 0 else ""
-            out.append(f"  {r['id']}  «{cut(r['quote'], 70)}»{tail}")
+            out.append(f"  {r['id']}  «{cut(visible(r, 'quote'), 70)}»{tail}")
             out.append(f"       стоит: {r['blocking']}")
             out.append(f"       хочет: {who(manifest, r.get('wanted_by'))}"
                        + (f" · {', '.join(r['based_on'])}" if r.get("based_on") else ""))
@@ -137,7 +152,7 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
             mark = "уже спрашивали" if q["raised"] else "НЕ СПРАШИВАЛИ"
             age = days_blocked(q)
             tail = f"  ({age} дн.)" if age is not None and age > 0 else ""
-            out.append(f"  {q['id']}  {cut(q['text'], 70)}{tail}")
+            out.append(f"  {q['id']}  {cut(visible(q, 'text'), 70)}{tail}")
             out.append(f"       стоит: {q['blocking']}   [{mark}]")
             if not q["raised"] and q.get("asked_of"):
                 # «Не спрашивали» без указания, у кого спрашивать, — половина
@@ -158,14 +173,14 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
             if q["raised"]:
                 last = q["raised"][-1]
                 tail = f"  ← спрошено {last['at']} у {who(manifest, last['to'])}"
-            out.append(f"  {Q_MARK[q['state']]} {q['id']}  {cut(q['text'], 66)}{tail}")
+            out.append(f"  {Q_MARK[q['state']]} {q['id']}  {cut(visible(q, 'text'), 66)}{tail}")
         out.append("")
 
     if not open_only:
         out += ["━━━ ТРЕБОВАНИЯ ━━━", ""]
         for r in [x for x in reqs if not x["superseded"]]:
             mark = STATE_MARK[r["state"]]
-            out.append(f"  {mark} {r['id']}  «{cut(r['quote'], 64)}»")
+            out.append(f"  {mark} {r['id']}  «{cut(visible(r, 'quote'), 64)}»")
             detail = []
             if r.get("evidence"):
                 detail.append(f"подтверждено: {r['evidence']}")

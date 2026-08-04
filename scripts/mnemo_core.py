@@ -19,7 +19,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.10"
+SPEC_VERSION = "1.11"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"
@@ -486,6 +486,7 @@ def new_requirement(**kwargs: Any) -> dict:
         "stage": kwargs.get("stage"),
         "supersedes": kwargs.get("supersedes"),
         "note": kwargs.get("note"),
+        "redactions": list(kwargs.get("redactions") or []),
         "date": kwargs.get("date") or today(),
     }
     if record["state"] not in REQUIREMENT_STATES:
@@ -526,6 +527,7 @@ def new_question(**kwargs: Any) -> dict:
         "raised": list(kwargs.get("raised") or []),
         "answered_by": kwargs.get("answered_by"),
         "dropped_reason": kwargs.get("dropped_reason"),
+        "redactions": list(kwargs.get("redactions") or []),
         "date": kwargs.get("date") or today(),
     }
     if not str(record["text"]).strip():
