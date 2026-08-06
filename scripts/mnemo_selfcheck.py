@@ -38,6 +38,23 @@ RULE_RE = re.compile(r"\bV(\d{2})\b")
 PRIVATE_TERMS = Path.home() / ".config" / "mnemo" / "private-terms.txt"
 
 
+def plugin_version(root: Path) -> str:
+    try:
+        return json.loads((root / ".claude-plugin" / "plugin.json")
+                          .read_text(encoding="utf-8"))["version"]
+    except (OSError, ValueError, KeyError):
+        return "?"
+
+
+def query_contract(root: Path) -> str:
+    try:
+        audit = (root / "scripts" / "mnemo_audit.py").read_text(encoding="utf-8")
+    except OSError:
+        return "?"
+    found = re.search(r'^QUERY_CONTRACT = "([^"]+)"', audit, re.M)
+    return found.group(1) if found else "?"
+
+
 def check_private_terms(root: Path) -> list[str]:
     """Настоящие имена в файлах, которые уедут в публичный репозиторий.
 
@@ -52,6 +69,15 @@ def check_private_terms(root: Path) -> list[str]:
     if not terms:
         return []
 
+    inside = subprocess.run(["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+                            capture_output=True, text=True)
+    if inside.returncode != 0:
+        # Не репозиторий — значит это установленная копия плагина, а не рабочее
+        # дерево. Публиковать оттуда нечего, и проверка не про неё. Раньше здесь
+        # печаталось «git не отдал список файлов», и самопроверка на установленной
+        # копии всегда падала одним и тем же ложным расхождением — а проверка,
+        # которая всегда красная, читается как «всё сломано» и перестаёт читаться.
+        return []
     listing = subprocess.run(["git", "-C", str(root), "ls-files"],
                              capture_output=True, text=True)
     if listing.returncode != 0:
@@ -223,13 +249,22 @@ def main() -> int:
     argp.add_argument("--root", default=str(Path(__file__).resolve().parent.parent))
     args = argp.parse_args()
 
-    problems = check(Path(args.root))
+    root = Path(args.root)
+    # Версии печатаем всегда, до вердикта: главный вопрос при возврате к работе —
+    # «а обновилась ли установленная копия или я смотрю на старую», и ответ на
+    # него не должен зависеть от того, нашлись расхождения или нет. Путь тут же:
+    # он содержит версию, и по нему видно, из какого каталога всё это взято.
+    print(f"плагин {plugin_version(root)} · стандарт {SPEC_VERSION} · "
+          f"контракт чтения {query_contract(root)}")
+    print(f"откуда: {root}")
+
+    problems = check(root)
     for line in problems:
         print(f"РАСХОЖДЕНИЕ: {line}")
     if problems:
         print(f"\n❌ расхождений: {len(problems)}")
         return 1
-    print(f"✅ плагин согласован сам с собой (стандарт {SPEC_VERSION})")
+    print("✅ плагин согласован сам с собой")
     return 0
 
 
