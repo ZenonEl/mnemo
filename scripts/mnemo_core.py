@@ -16,10 +16,11 @@ import os
 import re
 import unicodedata
 from datetime import date, datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.12"
+SPEC_VERSION = "1.13"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"
@@ -546,6 +547,104 @@ def new_question(**kwargs: Any) -> dict:
         raise MnemoError(f"{record['id']}: вопрос не может отвечать сам на себя")
     parse_day(record["date"])
     return record
+
+
+STALE_AFTER_DAYS = 7
+
+
+def days_since(day: str | None) -> int | None:
+    if not day:
+        return None
+    try:
+        then = datetime.strptime(day, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return (date.today() - then).days
+
+
+def last_raised(record: dict) -> str | None:
+    """Когда вопрос поднимали в последний раз."""
+    marks = [m.get("at") for m in record.get("raised") or [] if m.get("at")]
+    return max(marks) if marks else None
+
+
+def stale_reason(record: dict, kind: str, after: int = STALE_AFTER_DAYS) -> str | None:
+    """Почему запись протухла — или `None`, если она живая.
+
+    «Открыто» и «протухло» — разные состояния, и складывать их в одну кучу
+    вредно: список открытых вопросов создаёт видимость работы, пока в нём лежат
+    те, которые спросили две недели назад и не получили ответа. Их надо
+    переспросить или снять, а не показывать рядом со вчерашними.
+    """
+    if kind == "question":
+        if record.get("answered_by") or record.get("dropped_reason"):
+            return None
+        asked = last_raised(record)
+        if asked:
+            waited = days_since(asked)
+            if waited is not None and waited >= after:
+                return f"спрошено {waited} дн. назад, ответа нет — переспроси или сними"
+            return None
+        age = days_since(record.get("date"))
+        if age is not None and age >= after:
+            return f"лежит {age} дн. и никому не задан — задай или сними"
+        return None
+
+    if record.get("state") == "done":
+        age = days_since(record.get("date"))
+        if age is not None and age >= after:
+            return f"сделано, но заказчик не принял {age} дн. — добейся приёмки"
+    return None
+
+
+def normalize_phrase(text: str) -> list[str]:
+    """Слова записи без пунктуации и регистра — основа сравнения на похожесть."""
+    cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in str(text).lower())
+    return [w for w in cleaned.split() if len(w) > 2]
+
+
+def similarity(first: str, second: str) -> float:
+    """Насколько две формулировки похожи, 0..1.
+
+    Две меры, берём большую. Порядок слов в требованиях гуляет свободно
+    («интеграция с Ozon» и «Ozon: сделать интеграцию»), поэтому одного
+    посимвольного сравнения мало — общие слова ловят перестановку. И наоборот,
+    доля общих слов слепа к «формат артикулов» против «формат артикула»,
+    поэтому нужна и посимвольная мера.
+    """
+    left, right = normalize_phrase(first), normalize_phrase(second)
+    if not left or not right:
+        return 0.0
+    # Сравниваем по огрызкам слов, а не по словам целиком: русский язык склоняет,
+    # и «сделать интеграцию с Ozon» против «Ozon: интеграция остатков» — то самое
+    # задваивание, которое случилось на живом проекте. По целым словам оно не
+    # ловится, по первым пяти буквам ловится.
+    lset, rset = {w[:5] for w in left}, {w[:5] for w in right}
+    overlap = len(lset & rset) / min(len(lset), len(rset))
+    chars = SequenceMatcher(None, " ".join(left), " ".join(right)).ratio()
+    return max(overlap, chars)
+
+
+SIMILAR_ENOUGH = 0.62
+
+
+def similar_records(text: str, records: list[dict], field: str,
+                    threshold: float = SIMILAR_ENOUGH) -> list[tuple[str, str, float]]:
+    """Уже заведённые записи, похожие на новую.
+
+    Инструмент **не сливает** их сам: решать, что две формулировки — одно и то
+    же требование, он не вправе, а ошибка тут необратима (потеряется чужая
+    формулировка). Но и молчать он не должен: именно на молчании завелись два
+    требования про одно и то же на живом проекте.
+    """
+    out = []
+    for record in records:
+        if record.get("dropped_reason") or record.get("state") == "dropped":
+            continue
+        ratio = similarity(text, record.get(field, ""))
+        if ratio >= threshold:
+            out.append((record.get("id", "?"), str(record.get(field, "")), ratio))
+    return sorted(out, key=lambda row: -row[2])
 
 
 def question_state(record: dict) -> str:

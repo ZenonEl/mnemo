@@ -36,7 +36,7 @@ from mnemo_core import (  # noqa: E402
     SOURCES, STATUSES, MnemoError, ensure_skeleton, empty_manifest, find_export,
     contained, find_item, load_manifest, message_filename, new_item, new_person,
     blocked_since, find_record, new_question, new_redaction, new_requirement,
-    next_id, question_state,
+    next_id, question_state, similar_records,
     parse_day, rel, resolve_person, save_manifest, sha256_file, slugify, today,
 )
 
@@ -642,6 +642,107 @@ def cmd_rehash(args) -> int:
     return 0
 
 
+QUESTION_GATE = {
+    "impact": ("--impact", "что меняется от ответа — назови, что конкретно будет "
+                           "сделано иначе; если ничего, это не вопрос, а любопытство"),
+    "asked_of": ("--asked-of", "кому адресован — человек из реестра; если адресата "
+                               "нет, вопрос вне нашей компетенции либо это наше "
+                               "собственное решение, а не вопрос"),
+    "based_on": ("--based-on", "из какого материала возник — ссылка ctx:; вопрос без "
+                               "основания взят из головы, а не из работы"),
+}
+
+
+def gate_question(values: dict) -> None:
+    """Три поля, без которых новый вопрос не заводится.
+
+    Запись в архив ничего не стоит, и поэтому в него натекает. Инструмент умел
+    проверять, насколько правдив материал, и не умел спрашивать, заслуживает ли
+    запись существования. На живом проекте это дало двадцать открытых вопросов,
+    из которых ни один не был задан никому.
+
+    Все три поля существовали и раньше — необязательными. Обязательными они
+    отсекают ровно три вида мусора: вопрос, от ответа на который ничего не
+    меняется; вопрос не к кому; вопрос не из материала.
+
+    Предупреждением это делать бессмысленно: предупреждение, которое можно
+    пропустить, пропускают на третий день — тот же механизм, из-за которого
+    умирает ручное ведение.
+    """
+    missing = [(flag, why) for field, (flag, why) in QUESTION_GATE.items()
+               if not str(values.get(field) or "").strip()]
+    if not missing:
+        return
+    lines = ["новый вопрос требует всех трёх полей — иначе он засоряет архив:"]
+    for flag, why in missing:
+        lines.append(f"    {flag}")
+        lines.append(f"        {why}")
+    lines.append("")
+    lines.append("Если ответ на два из них «не знаю» — вопрос ещё не созрел,")
+    lines.append("и место ему не в архиве, а в голове.")
+    raise MnemoError("\n".join(lines))
+
+
+def report_similar_batch(fresh, records, field, anyway, kind):
+    """Похожие для целого пакета — списком, до записи.
+
+    Отказ на первой же строке заставлял бы разбирать файл по одному пункту;
+    человеку нужен весь список сразу, чтобы решить одним заходом.
+    """
+    if anyway:
+        return
+    suspects = []
+    for text, _refs in fresh:
+        close = similar_records(text, records, field)
+        if close:
+            suspects.append((text, close))
+    if not suspects:
+        return
+    # Печатаем в stdout, а не в текст ошибки: план пакета уже ушёл туда же, и
+    # разнесённый по двум потокам вывод перемешивается на экране.
+    print(f"\nпохоже на уже заведённое — {len(suspects)} из {len(fresh)}:\n")
+    for text, close in suspects:
+        print(f"  «{text[:60]}»")
+        for ident, existing, ratio in close[:3]:
+            print(f"      ~ {ident}  {int(ratio * 100)}%  {existing[:56]}")
+    sys.stdout.flush()
+    raise MnemoError(
+        f"повторы: {len(suspects)}. Убери их из файла, оформи замену через "
+        f"--supersedes или, если записи правда разные, повтори с --anyway"
+    )
+
+
+def refuse_if_similar(new_text: str, records: list[dict], field: str,
+                      anyway: bool, kind: str) -> None:
+    """Отказаться заводить запись, похожую на существующую, без явного решения.
+
+    Инструмент не сливает записи сам: решить, что две формулировки — одно и то
+    же, он не вправе, а ошибка необратима — потеряется чужая формулировка. Но
+    молчать он тоже не должен. На живом проекте молчание дало два требования про
+    интеграцию с одной площадкой и два про склад; заметил это человек, спустя
+    неделю, случайно.
+
+    Поэтому решение остаётся за человеком, но принять его он обязан явно.
+    """
+    if anyway:
+        return
+    close = similar_records(new_text, records, field)
+    if not close:
+        return
+    lines = [f"похоже на уже заведённое ({len(close)}):"]
+    for ident, text, ratio in close[:5]:
+        lines.append(f"    {ident}  {int(ratio * 100)}%  {text[:64]}")
+    lines.append("")
+    lines.append("Реши явно, что это:")
+    if kind == "требование":
+        lines.append("  замена старого   → --supersedes <id>")
+        lines.append("  дополнение       → req --id <id> --note \"...\"")
+    else:
+        lines.append("  тот же вопрос    → ask --id <id> --raised-to ...")
+    lines.append("  правда другое    → повтори с --anyway")
+    raise MnemoError("\n".join(lines))
+
+
 def read_batch(path: Path) -> list[tuple[str, list[str]]]:
     """Список записей из файла: по одной на строку.
 
@@ -732,6 +833,8 @@ def cmd_req(args) -> int:
         entries = read_batch(Path(args.batch).expanduser())
         fresh, _ = batch_plan(entries, [r["quote"] for r in manifest["requirements"]],
                               "требование")
+        report_similar_batch(fresh, manifest["requirements"], "quote",
+                             args.anyway, "требование")
         if not args.apply:
             print("\n— это план. Ничего не изменено. Повтори с --apply.")
             return 0
@@ -780,6 +883,11 @@ def cmd_req(args) -> int:
 
     if not args.quote:
         raise MnemoError("--quote обязателен: дословно, как было сказано")
+    if not args.supersedes:
+        # Явная отмена — уже принятое решение «это про то же самое», второй раз
+        # спрашивать незачем.
+        refuse_if_similar(args.quote, manifest["requirements"], "quote",
+                          args.anyway, "требование")
     record = new_requirement(
         id=next_id(manifest, "requirement"), quote=args.quote,
         wanted_by=args.wanted_by, based_on=[b.strip() for b in (args.based_on or "").split(",") if b.strip()],
@@ -810,7 +918,14 @@ def cmd_ask(args) -> int:
             raise MnemoError("отметки --raised-to / --answered-by / --dropped-reason "
                              "к пакету не применяются: они про конкретный вопрос")
         entries = read_batch(Path(args.batch).expanduser())
+        # Заслон действует и на пакет: двадцать вопросов без impact — это
+        # двадцать раз тот же мусор, а не исключение из правила. `based_on`
+        # берётся из хвоста строки после `::` либо из общего флага.
+        for text, refs in entries:
+            gate_question({"impact": args.impact, "asked_of": args.asked_of,
+                           "based_on": refs or args.based_on})
         fresh, _ = batch_plan(entries, [q["text"] for q in manifest["questions"]], "вопрос")
+        report_similar_batch(fresh, manifest["questions"], "text", args.anyway, "вопрос")
         if not args.apply:
             print("\n— это план. Ничего не изменено. Повтори с --apply.")
             return 0
@@ -855,6 +970,9 @@ def cmd_ask(args) -> int:
 
     if not args.text:
         raise MnemoError("--text обязателен")
+    gate_question({"impact": args.impact, "asked_of": args.asked_of,
+                   "based_on": args.based_on})
+    refuse_if_similar(args.text, manifest["questions"], "text", args.anyway, "вопрос")
     record = new_question(
         id=next_id(manifest, "question"), text=args.text, impact=args.impact,
         blocking=args.blocking, blocking_since=args.blocking_since, asked_of=args.asked_of,
@@ -1081,6 +1199,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_req.add_argument("--supersedes", default=None, help="какое требование отменяет")
     p_req.add_argument("--note", default=None, help="расхождения, оговорки")
     p_req.add_argument("--date", default=None)
+    p_req.add_argument("--anyway", action="store_true",
+                    help="да, это правда другая запись, а не повтор похожей")
     p_req.add_argument("--batch", default=None,
                     help="файл со списком: по записи на строку, необязательный хвост после `::` — ссылки based_on")
     p_req.add_argument("--apply", action="store_true",
@@ -1104,6 +1224,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--answered-by", dest="answered_by", default=None, help="ссылка на ответ")
     p_ask.add_argument("--dropped-reason", dest="dropped_reason", default=None)
     p_ask.add_argument("--date", default=None)
+    p_ask.add_argument("--anyway", action="store_true",
+                    help="да, это правда другая запись, а не повтор похожей")
     p_ask.add_argument("--batch", default=None,
                     help="файл со списком: по записи на строку, необязательный хвост после `::` — ссылки based_on")
     p_ask.add_argument("--apply", action="store_true",

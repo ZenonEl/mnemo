@@ -34,8 +34,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    SPEC_VERSION, MnemoError, blocked_since, days_blocked, find_export,
-    load_manifest, question_state, resolve_person, superseded_ids,
+    SPEC_VERSION, STALE_AFTER_DAYS, MnemoError, blocked_since, days_blocked,
+    find_export, load_manifest, question_state, resolve_person, stale_reason,
+    superseded_ids,
 )
 
 # Версия контракта чтения — своя, не версия стандарта: формат вывода может
@@ -88,7 +89,7 @@ Q_DEFAULTS = {"text": "<без текста>", "date": "1970-01-01", "raised": [
               "impact": None, "answered_by": None, "asked_of": None, "id": "?"}
 
 
-def derived(record: dict) -> dict:
+def derived(record: dict, kind: str) -> dict:
     """Выведенное состояние — рядом с записью, а не только в порядке сортировки.
 
     Раньше «висит третий день» существовало лишь как ключ сортировки, и любой
@@ -96,7 +97,8 @@ def derived(record: dict) -> dict:
     его правилом отката на дату записи. Два места, где вычисляется одно и то же,
     расходятся — поэтому вывод отдаётся готовым.
     """
-    return {"blocked_since": blocked_since(record), "days_blocked": days_blocked(record)}
+    return {"blocked_since": blocked_since(record), "days_blocked": days_blocked(record),
+            "stale_reason": stale_reason(record, kind)}
 
 
 # Поля, которые в контракт чтения не выходят: рядом с выведенным соседом они —
@@ -146,8 +148,9 @@ def collect(manifest: dict) -> dict:
         if full["state"] not in ("stated", "accepted", "done", "verified", "dropped"):
             full["state"] = "stated"
         reqs.append({**full, "superseded": full["id"] in dead,
-                     "superseded_by": replaced_by.get(full["id"]), **derived(full)})
-    questions = [{**Q_DEFAULTS, **q, "state": question_state(q), **derived(q)}
+                     "superseded_by": replaced_by.get(full["id"]),
+                     **derived(full, "requirement")})
+    questions = [{**Q_DEFAULTS, **q, "state": question_state(q), **derived(q, "question")}
                  for q in manifest.get("questions", [])]
 
     # Порядок: блокирующее вперёд, среди блокирующего — давнее вперёд, затем
@@ -177,6 +180,12 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
     claimed = [r for r in live if r["state"] == "done"]
     pending = [r for r in live if r["state"] in ("stated", "accepted")]
     open_q = [q for q in questions if q["state"] in ("open", "raised")]
+    # Протухшее — отдельно от открытого. Список открытых создаёт видимость
+    # работы, пока в нём вперемешку лежат вчерашние и те, что спросили две
+    # недели назад и не дождались ответа. Вторые требуют действия другого рода:
+    # переспросить или снять, а не ждать дальше.
+    stale = [r for r in live if r.get("stale_reason")] + \
+            [q for q in questions if q.get("stale_reason")]
 
     out = [f"АУДИТ — {meta['title']}", ""]
     # Прежняя формулировка «заявлено сделанным» читалась как «без доказательства»,
@@ -233,6 +242,14 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
             out.append(f"  {Q_MARK[q['state']]} {q['id']}  {cut(visible(q, 'text'), 66)}{tail}")
         out.append("")
 
+    if stale:
+        out += [f"━━━ ПРОТУХЛО (больше {STALE_AFTER_DAYS} дн. без движения) ━━━", ""]
+        for record in stale:
+            field = "quote" if str(record["id"]).startswith("t") else "text"
+            out.append(f"  {record['id']}  {cut(visible(record, field), 62)}")
+            out.append(f"       {record['stale_reason']}")
+        out.append("")
+
     if not open_only:
         out += ["━━━ ТРЕБОВАНИЯ ━━━", ""]
         for r in [x for x in reqs if not x["superseded"]]:
@@ -253,6 +270,9 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
 
     # Итог формулируем как ответ, а не как статистику: именно он и нужен.
     out.append("━━━ ОТВЕТ ━━━")
+    if stale:
+        out.append(f"Протухло без движения: {len(stale)} — их не ждут, "
+                   "а переспрашивают или снимают.")
     if not live:
         out.append("Требования не заведены — отвечать не на чем.")
     elif claimed or pending:
