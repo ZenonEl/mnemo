@@ -219,6 +219,29 @@ def contained(root: Path, relative: str) -> Path | None:
     return resolved
 
 
+# Экспорты, замок которых держит этот процесс. Нужен не для удобства, а для
+# того, чтобы правило было свойством операции, а не памятью автора: список
+# защищаемых команд устаревает при первом же новом вызывающем — так `sync`,
+# живущий в другом файле, и прошёл мимо замка, стирая чужие записи.
+_HELD: set[str] = set()
+
+
+def assert_locked(export: Path) -> None:
+    """Отказаться писать манифест без замка.
+
+    Проверка здесь, а не в вызывающем: манифест меняется чтением в память,
+    правкой и записью целиком, поэтому любая запись без замка теряет чужие
+    изменения. Кто добавит новый путь записи и забудет замок — узнает об этом
+    сразу и с объяснением, а не через осиротевшие файлы у пользователя.
+    """
+    if str(Path(export).resolve()) not in _HELD:
+        raise MnemoError(
+            f"попытка записать манифест {export} без замка. Оберни цикл "
+            "«прочитать — изменить — записать» в export_lock(export): без него "
+            "одновременная работа двух процессов теряет изменения"
+        )
+
+
 @contextmanager
 def export_lock(export: Path, timeout: float = 30.0):
     """Исключительный доступ к манифесту на время «прочитать — изменить — записать».
@@ -231,7 +254,15 @@ def export_lock(export: Path, timeout: float = 30.0):
     Замок лежит вне экспорта: §2 разрешает в каталоге только перечисленное, а
     служебный файл рядом с данными нарушал бы собственную же раскладку.
     """
-    key = hashlib.sha256(str(export.resolve()).encode()).hexdigest()[:16]
+    resolved = str(export.resolve())
+    if resolved in _HELD:
+        # Повторный захват тем же процессом: `init` берёт замок и внутри зовёт
+        # `sync`, который берёт его же. flock на втором дескрипторе конфликтует
+        # сам с собой, и команда вставала на весь таймаут. Раз замок уже наш,
+        # ничего делать не надо.
+        yield
+        return
+    key = hashlib.sha256(resolved.encode()).hexdigest()[:16]
     path = Path(tempfile.gettempdir()) / f"mnemo-{key}.lock"
     handle = path.open("a")
     deadline = time.monotonic() + timeout
@@ -248,8 +279,10 @@ def export_lock(export: Path, timeout: float = 30.0):
                         "команда не начата"
                     )
                 time.sleep(0.05)
+        _HELD.add(resolved)
         yield
     finally:
+        _HELD.discard(resolved)
         try:
             fcntl.flock(handle, fcntl.LOCK_UN)
         finally:
@@ -391,6 +424,7 @@ def save_manifest(export: Path, manifest: dict) -> None:
     экспорт намеренно держится вне git, истории версий у него нет.
     `os.replace` в пределах одной файловой системы атомарен.
     """
+    assert_locked(export)
     # Поднимаем заявленную версию, если содержимое её переросло. Чинить дрейф
     # в момент возникновения дешевле, чем ловить линтером годы спустя.
     needed = required_spec(manifest)

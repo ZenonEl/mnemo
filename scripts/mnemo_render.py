@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
+    export_lock,
     INDEX_NAME, MnemoError, days_blocked, find_export, load_manifest,
     question_state, required_spec, resolve_person, save_manifest, sha256_file,
     superseded_ids,
@@ -334,6 +335,17 @@ def render_redactions(manifest: dict) -> str:
 
 
 def sync(export: Path, rehash: bool = True) -> dict:
+    """Пересобрать производные из манифеста.
+
+    Под замком: это такой же цикл «прочитать — изменить — записать», как у
+    команд записи. Без него `sync` стирал закоммиченную соседом запись, а тот
+    рапортовал успех — материал оставался в RAW без учёта.
+    """
+    with export_lock(export):
+        return _sync(export, rehash)
+
+
+def _sync(export: Path, rehash: bool = True) -> dict:
     manifest = load_manifest(export)
 
     updated = 0

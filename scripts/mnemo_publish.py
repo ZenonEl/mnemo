@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    MnemoError, find_export, load_manifest, save_manifest, today,
+    MnemoError, export_lock, find_export, load_manifest, save_manifest, today,
 )
 
 # Ничего не выходит наружу «всегда». Раньше сюда попадал `conventions.md` —
@@ -165,7 +165,10 @@ def main() -> int:
         if out.exists() and any(out.iterdir()):
             raise MnemoError(f"{out} не пуст — укажи пустой каталог")
 
-        stats = build(export, out, manifest, public, tuple(args.include))
+        with export_lock(out):
+            # Срез — самостоятельный экспорт, и его манифест пишется по тем же
+            # правилам, что и любой другой.
+            stats = build(export, out, manifest, public, tuple(args.include))
         print("\n--- собрано ---")
         for key, count in sorted(stats.items()):
             print(f"  {key}: {count}")

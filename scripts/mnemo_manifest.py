@@ -1269,6 +1269,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 # Команды, которые правят манифест: они читают его в память, меняют и пишут
 # целиком, поэтому одновременная работа двух процессов теряет изменения.
+# Список остался как быстрый путь, но правило теперь охраняет сам
+# `save_manifest`: он отказывается писать без замка. Забытая команда падает с
+# объяснением, а не тихо теряет чужие изменения.
 MUTATING = {"remove", "add-file", "add-text", "add-gap", "redact", "rehash",
             "req", "ask", "people"}
 
@@ -1276,6 +1279,10 @@ MUTATING = {"remove", "add-file", "add-text", "add-gap", "redact", "rehash",
 def main() -> int:
     args = build_parser().parse_args()
     try:
+        if args.command == "init":
+            # Экспорта ещё нет, поэтому замок берётся на будущий каталог.
+            with export_lock(Path(args.dir).expanduser()):
+                return args.func(args)
         if args.command in MUTATING:
             export = find_export(Path(getattr(args, "export", ".")))
             with export_lock(export):

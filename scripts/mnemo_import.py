@@ -19,6 +19,7 @@ import argparse
 import re
 import shutil
 import signal
+from contextlib import contextmanager
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -356,23 +357,28 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
     # `systemctl stop`, `timeout`, кнопка «стоп» оставляли файлы в RAW без
     # записей в манифесте, и архив после этого не чинился сам. Превращаем
     # сигнал в исключение, чтобы сработал тот же откат, что и на Ctrl+C.
-    previous = signal.getsignal(signal.SIGTERM)
-    armed = False
+    # SIGHUP — закрытая вкладка терминала и оборванный ssh; для инструмента,
+    # которым правят из чат-сессии, случай обычный, а ущерб от него был
+    # неотличим от SIGKILL и притом неисправим: повторный импорт добавлял
+    # записи, не убирая сирот, и делал хуже.
+    catchable = [signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT]
+    previous: dict[int, object] = {}
 
-    def interrupted(*_: object) -> None:
-        raise KeyboardInterrupt("получен SIGTERM")
+    def interrupted(number, *_: object) -> None:
+        raise KeyboardInterrupt(f"получен сигнал {signal.Signals(number).name}")
 
-    try:
-        signal.signal(signal.SIGTERM, interrupted)
-        armed = True
-    except ValueError:
-        # Не главный поток — обработчик поставить нельзя, и это не повод падать.
-        previous = None
+    for number in catchable:
+        try:
+            previous[number] = signal.getsignal(number)
+            signal.signal(number, interrupted)
+        except (ValueError, OSError):
+            # Не главный поток либо сигнал недоступен — не повод падать.
+            previous.pop(number, None)
     def disarm() -> None:
-        nonlocal armed
-        if armed and previous is not None:
-            signal.signal(signal.SIGTERM, previous)
-            armed = False
+        for number, handler in list(previous.items()):
+            if handler is not None:
+                signal.signal(number, handler)
+            previous.pop(number, None)
 
     # Откатывать или нет, решает СОСТОЯНИЕ НА ДИСКЕ, а не момент: любой флаг,
     # выставляемый до или после сохранения, оставляет щель для сигнала.
@@ -633,6 +639,16 @@ def trash(path: Path) -> str:
 
 # --------------------------------------------------------------------------
 
+@contextmanager
+def _maybe_lock(export: Path, mutating: bool):
+    """Замок только когда собираемся писать: план ничего не меняет."""
+    if mutating:
+        with export_lock(export):
+            yield
+    else:
+        yield
+
+
 def main() -> int:
     argp = argparse.ArgumentParser(description="Импортировать источник в экспорт mnemo")
     argp.add_argument("--export", default=".")
@@ -677,29 +693,33 @@ def main() -> int:
         if not result.messages:
             raise MnemoError("в источнике нет сообщений — нечего импортировать")
 
-        manifest = load_manifest(export)
-        known = imported_keys(manifest)
-        fresh, duplicates = split_new(result, known)
-        plan = build_plan(result, source, fresh, duplicates)
-        strangers = unknown_names(manifest, [m.author for m in fresh]
-                                  + [m.via for m in fresh if m.via])
+        # Замок берётся ДО расчёта плана, а не только вокруг записи: план
+        # строится на дедупликации по уже принятым ключам, и два импорта,
+        # посчитавшие его от одного состояния, оба решают «свежо всё» и по
+        # очереди коммитят одно и то же. Архив задваивается целиком, а линтер
+        # этого не видит — оба процесса рапортуют «стандарт соблюдён».
+        #
+        # Для плана без записи замок не нужен: он ничего не меняет.
+        with _maybe_lock(export, args.apply):
+            manifest = load_manifest(export)
+            known = imported_keys(manifest)
+            fresh, duplicates = split_new(result, known)
+            plan = build_plan(result, source, fresh, duplicates)
+            strangers = unknown_names(manifest, [m.author for m in fresh]
+                                      + [m.via for m in fresh if m.via])
 
-        print_plan(parser_obj, result, plan, source, export, strangers)
+            print_plan(parser_obj, result, plan, source, export, strangers)
 
-        if not fresh:
-            print("\n— всё содержимое источника уже в архиве. Делать нечего.")
-            return 0
+            if not fresh:
+                print("\n— всё содержимое источника уже в архиве. Делать нечего.")
+                return 0
 
-        if not args.apply:
-            print("\n— это план. Ничего не изменено. Повтори с --apply, чтобы выполнить.")
-            return 0
+            if not args.apply:
+                print("\n— это план. Ничего не изменено. Повтори с --apply, чтобы выполнить.")
+                return 0
 
-        print("\n--- импорт ---")
-        preflight(plan)
-        with export_lock(export):
-            # Замок держится на всё «прочитать — изменить — записать»: без него
-            # соседняя команда, начавшая раньше и сохранившаяся позже, стирает
-            # партию импорта, а его файлы остаются в raw/ сиротами.
+            print("\n--- импорт ---")
+            preflight(plan)
             stats = apply(export, source, parser_obj, result, plan)
         from mnemo_render import sync
         sync(export)
