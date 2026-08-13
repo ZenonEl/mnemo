@@ -23,6 +23,10 @@ from typing import Any
 SPEC_VERSION = "1.14"
 SPEC_MAJOR = 1
 
+# Предел на слаг в имени файла. Имя складывается из даты, слага и имени
+# вложения, а файловые системы ограничивают компонент 255 байтами.
+SLUG_MAX_BYTES = 60
+
 MANIFEST_NAME = "MANIFEST.json"
 INDEX_NAME = "INDEX.md"
 
@@ -112,6 +116,12 @@ def slugify(text: str) -> str:
             out.append("-")
     slug = "".join(out)
     slug = re.sub(r"-+", "-", slug).strip("-")
+    # NAME_MAX считает байты, а не символы, и имя файла собирается из даты,
+    # слага автора и имени вложения. Telegram допускает отображаемое имя в
+    # 128 символов; после транслитерации кириллицы это вдвое больше байт, и
+    # импорт вложения падал OSError «File name too long» на каждом повторе.
+    if len(slug.encode()) > SLUG_MAX_BYTES:
+        slug = slug.encode()[:SLUG_MAX_BYTES].decode(errors="ignore").rstrip("-")
     return slug or "unnamed"
 
 

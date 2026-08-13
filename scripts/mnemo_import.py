@@ -341,7 +341,10 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
     written: list[Path] = []
     try:
         return _apply(export, source, parser_obj, result, plan, written)
-    except Exception:
+    except BaseException:
+        # Именно BaseException: Ctrl+C посреди копирования — самый частый
+        # способ получить полуприменённый импорт, а KeyboardInterrupt наследник
+        # BaseException, и `except Exception` его пропускал.
         for path in reversed(written):
             try:
                 path.unlink(missing_ok=True)
@@ -381,8 +384,8 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
             # трогаем (RAW неизменен), новый различаем датой импорта.
             target = claim_path(target.with_name(f"{target.stem}_{stamp}{target.suffix}"))
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(result.anchor, target)
         written.append(target)
+        shutil.copy2(result.anchor, target)
         manifest["items"].append(new_item(
             id=next_id(manifest), source="telegram",
             fidelity=parser_obj.max_fidelity,
@@ -442,8 +445,8 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
             target = claim_path(export / RAW_ZONES["message"] / message_filename(
                 day, chat_slug, f"chat-{stamp}"))
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body, encoding="utf-8")
         written.append(target)
+        target.write_text(body, encoding="utf-8")
         # Надёжность дня — по самому слабому сообщению в нём: материал не может
         # быть надёжнее того, что в него вошло.
         day_attribution = weakest(
@@ -494,8 +497,13 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
                     "файл не взят в архив: выгрузка не должна адресовать ничего "
                     "снаружи себя"
                     if outside else
-                    f"файл {Path(message.media).name} упомянут в выгрузке, "
-                    "но на диске отсутствует — возможно, не выгрузился"
+                    # Точная причина, если источник её знает: догадка «возможно,
+                    # не выгрузился» уезжала в хвосты вместо готового ответа,
+                    # который лежал рядом в самой записи.
+                    f"файл {Path(message.media).name} упомянут в выгрузке, но на "
+                    "диске отсутствует — " + (
+                        message.note or "причина источником не названа"
+                    )
                 ),
                 origin=f"«{result.title}», сообщение {message.msg_id or '?'}",
                 date=message.day, participants=[message.author],
@@ -507,8 +515,8 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
 
         target = export / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(found, target)
         written.append(target)
+        shutil.copy2(found, target)
         manifest["items"].append(new_item(
             id=next_id(manifest), source=SOURCE_BY_KIND[kind],
             fidelity="verbatim",

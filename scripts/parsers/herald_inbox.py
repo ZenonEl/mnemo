@@ -28,6 +28,9 @@ UNKNOWN_AUTHOR = "автор не установлен"
 # По этим полям формат опознаётся. Их отсутствие — отказ, а не тихая порча:
 # без `author_name` каждое сообщение стало бы «неизвестно», и импорт прошёл бы.
 REQUIRED_KEYS = {"chat_id", "message_id", "chat_slug", "date", "author_name"}
+# Поля, которых нет ни у одного другого формата: по ним отличаем «похоже на
+# herald, но неполное» от «это вообще не herald».
+HERALD_MARKERS = {"chat_slug", "origin_type", "media_note", "author_name", "local_path"}
 
 # Как вид вложения из Bot API называется в зонах RAW стандарта (§2).
 MEDIA_KIND = {
@@ -85,7 +88,14 @@ class HeraldInboxParser(Parser):
             data = data.get("messages")
         if not isinstance(data, list) or not data or not isinstance(data[0], dict):
             return set()
-        return REQUIRED_KEYS - set(data[0])
+        head = set(data[0])
+        # Подсказывать про herald имеет смысл, только если источник на него
+        # похож. Иначе любой нераспознанный JSON — включая выгрузку Telegram
+        # под переименованным файлом — получал совет запустить inbox_export,
+        # а настоящее сообщение о неизвестном формате пряталось.
+        if not (head & HERALD_MARKERS) or len(REQUIRED_KEYS & head) < 2:
+            return set()
+        return REQUIRED_KEYS - head
 
     @classmethod
     def detect(cls, source: Path) -> bool:
