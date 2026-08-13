@@ -20,7 +20,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.13"
+SPEC_VERSION = "1.14"
 SPEC_MAJOR = 1
 
 MANIFEST_NAME = "MANIFEST.json"

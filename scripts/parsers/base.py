@@ -38,6 +38,9 @@ class Message:
     # настоящего автора пересланного сообщения, но для скрывшего себя
     # отправителя знает только показанное имя.
     attribution: str | None = None
+    # Имя, которое источник показал вместо автора. Его нельзя объявлять автором
+    # (§4а.3), но и терять нельзя: это единственный след того, кто мог написать.
+    shown_as: str | None = None
 
     @property
     def day(self) -> str:
@@ -92,10 +95,16 @@ def weakest(values) -> str:
     них может отличаться. Материал не может быть надёжнее самого слабого из
     того, что в него вошло.
     """
-    known = [v for v in values if v in ATTRIBUTION]
-    if not known:
+    values = list(values)
+    unknown = [v for v in values if v not in ATTRIBUTION]
+    if unknown:
+        # Молчаливое игнорирование опечатки давало бы `reliable` там, где
+        # значение не разобрано, — то есть повышение надёжности, которое §4а.4
+        # разрешает только человеку.
+        raise ValueError(f"неизвестная надёжность авторства: {sorted(set(unknown))}")
+    if not values:
         return "unknown"
-    return max(known, key=ATTRIBUTION.index)
+    return max(values, key=ATTRIBUTION.index)
 
 
 @dataclass

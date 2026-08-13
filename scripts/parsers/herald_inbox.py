@@ -21,6 +21,10 @@ from pathlib import Path
 
 from .base import Message, ParseResult, Parser
 
+# §4а.3: при `forwarder-shown` приписывать материал показанному имени запрещено.
+# Допустимая формулировка — «переслано <кем>, автор не установлен».
+UNKNOWN_AUTHOR = "автор не установлен"
+
 # Как вид вложения из Bot API называется в зонах RAW стандарта (§2).
 MEDIA_KIND = {
     "voice": "voice",
@@ -84,25 +88,38 @@ class HeraldInboxParser(Parser):
             source_id=f"herald:{slugs[0]}" if len(slugs) == 1 else "herald",
         )
         if len(slugs) > 1:
-            result.notes.append(
+            # Не примечание, а отказ: `message_id` уникален внутри чата, и при
+            # смешении часть сообщений молча отсеивалась как повтор.
+            raise ValueError(
                 "в выгрузке несколько чатов: " + ", ".join(slugs)
-                + " — импортируй их по одному, иначе они смешаются в одном экспорте"
+                + ". Выгружай по одному: один архив — одна тема, а номера "
+                "сообщений в разных чатах повторяются"
             )
 
         skipped_media = 0
         for row in rows:
             author, via, attribution = _authorship(row)
+            shown = str(row.get("origin_name") or "").strip()
             media = row.get("local_path")
+            text = str(row.get("text") or "")
             if row.get("file_id") and not media:
                 skipped_media += 1
+                # §3.5: пропуск фиксируется, а не замалчивается. Без этой
+                # пометки сообщение с недоехавшим голосовым выглядит в архиве
+                # как пустое, и отличить одно от другого нечем.
+                kind = str(row.get("media_kind") or "вложение")
+                text = (text + "\n\n" if text else "") + (
+                    f"<{kind}: в буфер не попало — {row.get('media_note') or 'файла нет'}>"
+                )
             result.messages.append(Message(
                 date=str(row.get("date") or ""),
                 author=author,
-                text=str(row.get("text") or ""),
+                text=text,
                 via=via,
                 media=media,
                 media_kind=MEDIA_KIND.get(str(row.get("media_kind") or "")),
-                msg_id=str(row.get("message_id") or "") or None,
+                shown_as=shown if author == UNKNOWN_AUTHOR and shown else None,
+                msg_id=f"{row.get('chat_slug')}:{row.get('message_id')}",
                 reply_to=str(row.get("reply_to") or "") or None,
                 attribution=attribution,
             ))
@@ -139,8 +156,8 @@ def _authorship(row: dict) -> tuple[str, str | None, str]:
         return sender, None, "reliable"
     if origin == "user" and shown:
         return shown, sender, "reliable"
-    if origin == "hidden_user":
-        return shown or "автор не установлен", sender, "forwarder-shown"
-    if origin in ("chat", "channel") and shown:
-        return shown, sender, "forwarder-shown"
-    return sender, None, "unknown"
+    # Всё остальное — пересылка, автора которой мы не установили. Раньше такие
+    # подписывались отправителем, и информация о пересылке терялась вовсе: ровно
+    # та ошибка, ради предотвращения которой формат и выбран. Имя, если оно
+    # есть, сохраняем показанным, но автором не объявляем — §4а.3.
+    return UNKNOWN_AUTHOR, sender, "forwarder-shown"

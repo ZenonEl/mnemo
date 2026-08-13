@@ -66,6 +66,24 @@ SOURCE_BY_KIND = {"voice": "voice", "photo": "screenshot", "document": "other"}
 # Рендер сообщений
 # --------------------------------------------------------------------------
 
+def media_note(message: Message, result: ParseResult, parser_label: str) -> str | None:
+    """Пояснение к записи о вложении.
+
+    §4а.2: надёжность хуже `reliable` обязана нести объяснение, чьё авторство
+    под вопросом. Вложение наследует надёжность своего сообщения, а не
+    источника целиком, — значит и объяснение у него своё.
+    """
+    attribution = message.attribution or result.attribution
+    if attribution == "reliable":
+        return None
+    shown = f", показано имя «{message.shown_as}»" if message.shown_as else ""
+    forwarded = f", переслал {message.via}" if message.via else ""
+    return (
+        f"вложение из «{parser_label}»: авторство `{attribution}` — "
+        f"автор не установлен{shown}{forwarded}"
+    )
+
+
 def render_day(title: str, day: str, messages: list[Message], result: ParseResult,
                parser_label: str, media_paths: dict[str, str]) -> str:
     """Дневной транскрипт в markdown.
@@ -87,14 +105,8 @@ def render_day(title: str, day: str, messages: list[Message], result: ParseResul
     ]
     if attribution != "reliable":
         lines += [
-            "> ⚠️ Имя над сообщением может принадлежать не автору, а тому, кто "
-            "переслал. Цитировать по автору нельзя.",
-            "",
-            "> Надёжные сообщения в этом дне помечены: "
-            + (", ".join(sorted({
-                m.author for m in messages
-                if (m.attribution or result.attribution) == "reliable"
-            })) or "нет"),
+            "> ⚠️ Надёжность у сообщений в этом дне разная. Ненадёжные помечены "
+            "`⚠` в строке автора; по остальным авторство установлено.",
             "",
         ]
     lines.append("---")
@@ -103,6 +115,13 @@ def render_day(title: str, day: str, messages: list[Message], result: ParseResul
     for message in messages:
         time = message.date[11:16] or "??:??"
         who = message.author
+        if (message.attribution or result.attribution) != "reliable":
+            # Пометка стоит у сообщения, а не в общем списке имён: надёжность
+            # здесь свойство сообщения, и одно и то же имя бывает над надёжным
+            # и над ненадёжным в один день.
+            who = f"⚠ {who}"
+        if message.shown_as:
+            who += f" _(показано имя: {message.shown_as})_"
         if message.via:
             who += f" _(переслал: {message.via})_"
         lines.append(f"### {time} · {who}")
@@ -306,8 +325,13 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
     fidelity = parser_obj.max_fidelity
     note_parts = [f"импортировано из «{parser_obj.label}»"]
     note_parts += result.notes
-    fidelity_note = "; ".join(note_parts) if fidelity != "verbatim" or \
-        result.attribution != "reliable" else None
+    # Примечания источника («вложение не скачано», «файла нет») раньше попадали
+    # в это условие и терялись целиком, когда достоверность и надёжность были
+    # лучшими: предупреждение печаталось в план и нигде не сохранялось. §3.5
+    # требует, чтобы отсутствие фиксировалось, а не замалчивалось.
+    fidelity_note = "; ".join(note_parts) if (
+        fidelity != "verbatim" or result.attribution != "reliable" or result.notes
+    ) else None
 
     # --- машинный первоисточник ---
     if result.anchor and result.anchor.is_file():
@@ -319,8 +343,13 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(result.anchor, target)
         manifest["items"].append(new_item(
-            id=next_id(manifest), source="telegram", fidelity="verbatim",
-            attribution="reliable",
+            id=next_id(manifest), source="telegram",
+            fidelity=parser_obj.max_fidelity,
+            attribution=result.attribution,
+            fidelity_note=None if (
+                parser_obj.max_fidelity == "verbatim"
+                and result.attribution == "reliable"
+            ) else f"первоисточник импорта «{parser_obj.label}»",
             origin=f"машинная выгрузка «{result.title}», первоисточник импорта",
             date=min(plan["days"], default=today()),
             participants=sorted({m.author for m in fresh}),
@@ -405,7 +434,8 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         if found is None:
             manifest["items"].append(new_item(
                 id=next_id(manifest), source=SOURCE_BY_KIND[kind],
-                fidelity="placeholder", attribution=result.attribution,
+                fidelity="placeholder",
+                attribution=message.attribution or result.attribution,
                 fidelity_note=(
                     f"путь «{message.media}» ведёт за пределы каталога выгрузки — "
                     "файл не взят в архив: выгрузка не должна адресовать ничего "
@@ -427,11 +457,9 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         shutil.copy2(found, target)
         manifest["items"].append(new_item(
             id=next_id(manifest), source=SOURCE_BY_KIND[kind],
-            fidelity="verbatim", attribution=result.attribution,
-            fidelity_note=(
-                None if result.attribution == "reliable"
-                else f"оригинал файла дословен; авторство: {result.notes[0] if result.notes else 'под вопросом'}"
-            ),
+            fidelity="verbatim",
+            attribution=message.attribution or result.attribution,
+            fidelity_note=media_note(message, result, parser_obj.label),
             origin=f"«{result.title}», сообщение {message.msg_id or '?'}",
             date=message.day, participants=[message.author],
             raw_path=rel_path, sha256=sha256_file(target), status="present",
