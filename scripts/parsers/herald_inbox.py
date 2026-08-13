@@ -25,6 +25,10 @@ from .base import Message, ParseResult, Parser
 # Допустимая формулировка — «переслано <кем>, автор не установлен».
 UNKNOWN_AUTHOR = "автор не установлен"
 
+# По этим полям формат опознаётся. Их отсутствие — отказ, а не тихая порча:
+# без `author_name` каждое сообщение стало бы «неизвестно», и импорт прошёл бы.
+REQUIRED_KEYS = {"chat_id", "message_id", "chat_slug", "date", "author_name"}
+
 # Как вид вложения из Bot API называется в зонах RAW стандарта (§2).
 MEDIA_KIND = {
     "voice": "voice",
@@ -67,8 +71,21 @@ class HeraldInboxParser(Parser):
             return None
         # Отличаем от других JSON по набору полей, а не по имени файла: имя
         # человек даёт какое захочет.
-        required = {"chat_slug", "message_id", "chat_id"}
-        return data if required <= set(head) else None
+        return data if REQUIRED_KEYS <= set(head) else None
+
+    @classmethod
+    def missing_keys(cls, source: Path) -> set[str]:
+        """Каких обязательных полей нет — чтобы отказ был диагнозом, а не «нет»."""
+        path = source / "inbox.json" if source.is_dir() else source
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return set()
+        if isinstance(data, dict):
+            data = data.get("messages")
+        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+            return set()
+        return REQUIRED_KEYS - set(data[0])
 
     @classmethod
     def detect(cls, source: Path) -> bool:

@@ -331,6 +331,27 @@ def preflight(plan: dict) -> None:
 
 
 def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dict) -> dict:
+    """Внести источник в архив целиком — или не вносить вовсе.
+
+    Файлы пишутся раньше, чем манифест сохраняется, и любая ошибка контракта
+    посередине оставляла RAW с материалом, о котором манифест не знает: линтер
+    после этого краснеет навсегда, а повторный запуск заводит рядом вторые
+    копии, не убирая первые. Поэтому записанное этим запуском откатывается.
+    """
+    written: list[Path] = []
+    try:
+        return _apply(export, source, parser_obj, result, plan, written)
+    except Exception:
+        for path in reversed(written):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+        raise
+
+
+def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dict,
+           written: list[Path]) -> dict:
     manifest = load_manifest(export)
     stats = Counter()
     chat_slug = slugify(result.title)
@@ -348,6 +369,10 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         fidelity != "verbatim" or result.attribution != "reliable" or result.notes
     ) else None
 
+    anchor_attribution = weakest(
+        [m.attribution or result.attribution for m in fresh]
+    ) if fresh else result.attribution
+
     # --- машинный первоисточник ---
     if result.anchor and result.anchor.is_file():
         target = export / RAW_ZONES["attachment"] / result.anchor.name
@@ -357,14 +382,20 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
             target = claim_path(target.with_name(f"{target.stem}_{stamp}{target.suffix}"))
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(result.anchor, target)
+        written.append(target)
         manifest["items"].append(new_item(
             id=next_id(manifest), source="telegram",
             fidelity=parser_obj.max_fidelity,
-            attribution=result.attribution,
+            # Первоисточник содержит все сообщения разом, включая те, чьё
+            # авторство не установлено, — значит он не надёжнее слабейшего
+            # из них (§4а.6). Раньше он один объявлял reliable, перечисляя
+            # «автор не установлен» среди участников.
+            attribution=anchor_attribution,
             fidelity_note=None if (
                 parser_obj.max_fidelity == "verbatim"
-                and result.attribution == "reliable"
-            ) else f"первоисточник импорта «{parser_obj.label}»",
+                and anchor_attribution == "reliable"
+            ) else f"первоисточник импорта «{parser_obj.label}»: "
+                   f"надёжность по слабейшему сообщению в нём",
             origin=f"машинная выгрузка «{result.title}», первоисточник импорта",
             date=min(plan["days"], default=today()),
             participants=sorted({m.author for m in fresh}),
@@ -412,6 +443,7 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
                 day, chat_slug, f"chat-{stamp}"))
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
+        written.append(target)
         # Надёжность дня — по самому слабому сообщению в нём: материал не может
         # быть надёжнее того, что в него вошло.
         day_attribution = weakest(
@@ -476,6 +508,7 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         target = export / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(found, target)
+        written.append(target)
         manifest["items"].append(new_item(
             id=next_id(manifest), source=SOURCE_BY_KIND[kind],
             fidelity="verbatim",
@@ -547,6 +580,14 @@ def main() -> int:
 
         parser_obj = parsers.detect(source)
         if parser_obj is None:
+            from parsers.herald_inbox import HeraldInboxParser
+            absent = HeraldInboxParser.missing_keys(source)
+            if absent:
+                raise MnemoError(
+                    "похоже на выгрузку буфера herald, но в строках нет "
+                    f"обязательных полей: {', '.join(sorted(absent))}. "
+                    "Собирай каталог командой inbox_export, а не руками"
+                )
             known = ", ".join(n for n, _ in parsers.available())
             raise MnemoError(
                 f"формат не опознан: {source}. Известные: {known}. "
