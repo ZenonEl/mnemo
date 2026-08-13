@@ -345,18 +345,45 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
     # записей в манифесте, и архив после этого не чинился сам. Превращаем
     # сигнал в исключение, чтобы сработал тот же откат, что и на Ctrl+C.
     previous = signal.getsignal(signal.SIGTERM)
+    armed = False
 
     def interrupted(*_: object) -> None:
         raise KeyboardInterrupt("получен SIGTERM")
 
     try:
         signal.signal(signal.SIGTERM, interrupted)
+        armed = True
     except ValueError:
         # Не главный поток — обработчик поставить нельзя, и это не повод падать.
         previous = None
+    def disarm() -> None:
+        """Снять обработчик перед точкой невозврата.
+
+        Откат осмыслен только пока манифест не сохранён. Сохранение атомарно
+        (`os.replace`), поэтому после снятия обработчика сигнал оставляет
+        согласованное состояние: либо старый манифест и лишние файлы, либо
+        новый манифест и все файлы на месте. Оставлять обработчик до возврата
+        нельзя — сигнал в щели между записью и возвратом превращал успешный
+        импорт в уничтожение материала: файлы удалялись, записи о них
+        оставались, и повторный импорт уже ничего не чинил.
+        """
+        nonlocal armed
+        if armed:
+            signal.signal(signal.SIGTERM, previous)
+            armed = False
+
+    committed: list[bool] = []
     try:
-        return _apply(export, source, parser_obj, result, plan, written)
+        return _apply(export, source, parser_obj, result, plan, written, committed,
+                      disarm)
     except BaseException:
+        if committed:
+            # Манифест уже сохранён — точка невозврата пройдена, и «откат»
+            # здесь не спасает, а уничтожает: файлы удаляются, записи о них
+            # остаются, и архив после этого не чинится даже повторным импортом,
+            # потому что ключи сообщений уже в `imports`. Прерывание после
+            # сохранения — это успешный импорт, которому помешали доложить.
+            raise
         # Именно BaseException: Ctrl+C посреди копирования — самый частый
         # способ получить полуприменённый импорт, а KeyboardInterrupt наследник
         # BaseException, и `except Exception` его пропускал.
@@ -367,12 +394,11 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
                 continue
         raise
     finally:
-        if previous is not None:
-            signal.signal(signal.SIGTERM, previous)
+        disarm()
 
 
 def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dict,
-           written: list[Path]) -> dict:
+           written: list[Path], committed: list[bool], disarm) -> dict:
     manifest = load_manifest(export)
     stats = Counter()
     chat_slug = slugify(result.title)
@@ -559,7 +585,10 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
             if key
         }),
     })
+    disarm()
     save_manifest(export, manifest)
+    # С этого мгновения откат запрещён: материал в архиве, записи о нём тоже.
+    committed.append(True)
     return stats
 
 
