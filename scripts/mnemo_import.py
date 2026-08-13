@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import parsers  # noqa: E402
 from mnemo_core import (  # noqa: E402
-    RAW_ZONES, MnemoError, claim_path, contained, find_export, imported_keys, load_manifest,
+    RAW_ZONES, MnemoError, claim_path, contained, export_lock, find_export, imported_keys, load_manifest,
     message_filename, new_item, next_id, parse_day, save_manifest, sha256_file,
     slugify, today, unknown_names,
 )
@@ -696,7 +696,11 @@ def main() -> int:
 
         print("\n--- импорт ---")
         preflight(plan)
-        stats = apply(export, source, parser_obj, result, plan)
+        with export_lock(export):
+            # Замок держится на всё «прочитать — изменить — записать»: без него
+            # соседняя команда, начавшая раньше и сохранившаяся позже, стирает
+            # партию импорта, а его файлы остаются в raw/ сиротами.
+            stats = apply(export, source, parser_obj, result, plan)
         from mnemo_render import sync
         sync(export)
         for key, count in sorted(stats.items()):

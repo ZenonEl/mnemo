@@ -10,8 +10,12 @@ SPEC/STANDARD.md: экспорт должен читаться и проверя
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import tempfile
+import time
+from contextlib import contextmanager
 import os
 import re
 import unicodedata
@@ -213,6 +217,43 @@ def contained(root: Path, relative: str) -> Path | None:
     except ValueError:
         return None
     return resolved
+
+
+@contextmanager
+def export_lock(export: Path, timeout: float = 30.0):
+    """Исключительный доступ к манифесту на время «прочитать — изменить — записать».
+
+    Манифест меняется чтением в память, правкой и записью целиком. Два процесса,
+    делающие это одновременно, теряют изменения друг друга: сохранивший вторым
+    затирает первого, и его материал остаётся в `raw/` без записей. Проверено —
+    сосед, начавший до импорта и сохранившийся после, стирал всю его партию.
+
+    Замок лежит вне экспорта: §2 разрешает в каталоге только перечисленное, а
+    служебный файл рядом с данными нарушал бы собственную же раскладку.
+    """
+    key = hashlib.sha256(str(export.resolve()).encode()).hexdigest()[:16]
+    path = Path(tempfile.gettempdir()) / f"mnemo-{key}.lock"
+    handle = path.open("a")
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise MnemoError(
+                        f"экспорт занят другим процессом mnemo дольше {timeout:.0f} с. "
+                        "Одновременная правка манифеста теряет изменения, поэтому "
+                        "команда не начата"
+                    )
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def find_export(start: Path) -> Path:

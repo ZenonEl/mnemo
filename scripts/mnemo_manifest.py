@@ -36,7 +36,7 @@ from mnemo_core import (  # noqa: E402
     SOURCES, STATUSES, MnemoError, ensure_skeleton, empty_manifest, find_export,
     contained, find_item, load_manifest, message_filename, new_item, new_person,
     blocked_since, find_record, new_question, new_redaction, new_requirement,
-    next_id, question_state, similar_records,
+    export_lock, next_id, question_state, similar_records,
     parse_day, rel, resolve_person, save_manifest, sha256_file, slugify, today,
 )
 
@@ -1267,9 +1267,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Команды, которые правят манифест: они читают его в память, меняют и пишут
+# целиком, поэтому одновременная работа двух процессов теряет изменения.
+MUTATING = {"remove", "add-file", "add-text", "add-gap", "redact", "rehash",
+            "req", "ask", "people"}
+
+
 def main() -> int:
     args = build_parser().parse_args()
     try:
+        if args.command in MUTATING:
+            export = find_export(Path(getattr(args, "export", ".")))
+            with export_lock(export):
+                return args.func(args)
         return args.func(args)
     except MnemoError as exc:
         print(f"ошибка: {exc}", file=sys.stderr)
