@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -339,6 +340,20 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
     копии, не убирая первые. Поэтому записанное этим запуском откатывается.
     """
     written: list[Path] = []
+    # SIGTERM убивает процесс без исключения, поэтому откат до него не доходил:
+    # `systemctl stop`, `timeout`, кнопка «стоп» оставляли файлы в RAW без
+    # записей в манифесте, и архив после этого не чинился сам. Превращаем
+    # сигнал в исключение, чтобы сработал тот же откат, что и на Ctrl+C.
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def interrupted(*_: object) -> None:
+        raise KeyboardInterrupt("получен SIGTERM")
+
+    try:
+        signal.signal(signal.SIGTERM, interrupted)
+    except ValueError:
+        # Не главный поток — обработчик поставить нельзя, и это не повод падать.
+        previous = None
     try:
         return _apply(export, source, parser_obj, result, plan, written)
     except BaseException:
@@ -351,6 +366,9 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
             except OSError:
                 continue
         raise
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
 
 
 def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dict,
