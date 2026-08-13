@@ -357,27 +357,34 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
         # Не главный поток — обработчик поставить нельзя, и это не повод падать.
         previous = None
     def disarm() -> None:
-        """Снять обработчик перед точкой невозврата.
-
-        Откат осмыслен только пока манифест не сохранён. Сохранение атомарно
-        (`os.replace`), поэтому после снятия обработчика сигнал оставляет
-        согласованное состояние: либо старый манифест и лишние файлы, либо
-        новый манифест и все файлы на месте. Оставлять обработчик до возврата
-        нельзя — сигнал в щели между записью и возвратом превращал успешный
-        импорт в уничтожение материала: файлы удалялись, записи о них
-        оставались, и повторный импорт уже ничего не чинил.
-        """
         nonlocal armed
-        if armed:
+        if armed and previous is not None:
             signal.signal(signal.SIGTERM, previous)
             armed = False
+
+    # Откатывать или нет, решает СОСТОЯНИЕ НА ДИСКЕ, а не момент. Любой флаг,
+    # выставляемый до или после сохранения, оставляет щель, в которую попадает
+    # сигнал: снимали обработчик после — успешный импорт превращался в
+    # уничтожение; снимали до — незащищённой оказалась вся сериализация
+    # манифеста. Проверка «манифест на диске вырос» щелей не имеет: сохранение
+    # атомарно, значит оно либо случилось, либо нет.
+    before = load_manifest(export)
+    baseline = (len(before.get("items", [])), len(before.get("imports", [])))
+
+    def already_saved() -> bool:
+        try:
+            current = load_manifest(export)
+        except MnemoError:
+            return False
+        return (len(current.get("items", [])),
+                len(current.get("imports", []))) != baseline
 
     committed: list[bool] = []
     try:
         return _apply(export, source, parser_obj, result, plan, written, committed,
                       disarm)
     except BaseException:
-        if committed:
+        if committed or already_saved():
             # Манифест уже сохранён — точка невозврата пройдена, и «откат»
             # здесь не спасает, а уничтожает: файлы удаляются, записи о них
             # остаются, и архив после этого не чинится даже повторным импортом,
@@ -585,8 +592,8 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
             if key
         }),
     })
-    disarm()
     save_manifest(export, manifest)
+    disarm()
     # С этого мгновения откат запрещён: материал в архиве, записи о нём тоже.
     committed.append(True)
     return stats
