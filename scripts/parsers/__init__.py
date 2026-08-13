@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import ATTRIBUTION, Message, ParseResult, Parser, flatten_text
+from .base import ATTRIBUTION, Message, ParseResult, Parser, flatten_text, weakest
 from .tg_json import TelegramJsonParser
+from .herald_inbox import HeraldInboxParser
 from .tg_paste import TelegramPasteParser
 
 # Порядок значим: более специфичные форматы проверяются первыми. Выгрузка
@@ -20,12 +21,13 @@ from .tg_paste import TelegramPasteParser
 # не должна случайно достаться текстовому парсеру.
 PARSERS: tuple[type[Parser], ...] = (
     TelegramJsonParser,
+    HeraldInboxParser,
     TelegramPasteParser,
 )
 
 __all__ = [
     "ATTRIBUTION", "Message", "ParseResult", "Parser", "PARSERS",
-    "flatten_text", "detect", "available",
+    "flatten_text", "weakest", "detect", "available",
 ]
 
 

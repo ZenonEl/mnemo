@@ -33,6 +33,11 @@ class Message:
     media_kind: str | None = None  # voice | photo | document
     msg_id: str | None = None
     reply_to: str | None = None
+    # Надёжность авторства именно этого сообщения. `None` — «как у источника».
+    # Нужна форматам, где надёжность разная внутри одной выгрузки: бот отдаёт
+    # настоящего автора пересланного сообщения, но для скрывшего себя
+    # отправителя знает только показанное имя.
+    attribution: str | None = None
 
     @property
     def day(self) -> str:
@@ -78,6 +83,19 @@ class Message:
             return None
         digest = hashlib.sha256(f"{self.date[:16]}|{normalized}".encode()).hexdigest()[:16]
         return f"txt:{digest}"
+
+
+def weakest(values) -> str:
+    """Самая слабая надёжность из перечисленных (§4а: не завышать).
+
+    День транскрипта — один материал, а сообщений в нём много, и надёжность у
+    них может отличаться. Материал не может быть надёжнее самого слабого из
+    того, что в него вошло.
+    """
+    known = [v for v in values if v in ATTRIBUTION]
+    if not known:
+        return "unknown"
+    return max(known, key=ATTRIBUTION.index)
 
 
 @dataclass

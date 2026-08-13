@@ -30,7 +30,7 @@ from mnemo_core import (  # noqa: E402
     message_filename, new_item, next_id, parse_day, save_manifest, sha256_file,
     slugify, today, unknown_names,
 )
-from parsers.base import Message, ParseResult  # noqa: E402
+from parsers.base import Message, ParseResult, weakest  # noqa: E402
 
 # Начало строки, которое markdown прочитает как разметку, а не как текст.
 BLOCK_PREFIX = re.compile(r"^(\s*)([#>*+\-=|]|\d+[.)]|```|~~~)")
@@ -74,16 +74,27 @@ def render_day(title: str, day: str, messages: list[Message], result: ParseResul
     отдельно. Это главное, ради чего импорт вообще делается машиной: глазами
     и копипастой авторство пересланного теряется.
     """
+    # Надёжность берём по самому слабому сообщению дня, а не по источнику
+    # целиком: в одной пачке она бывает разной, и шапка, обещающая `reliable`
+    # над сообщением с неустановленным автором, — то самое расхождение между
+    # RAW и манифестом, против которого весь стандарт.
+    attribution = weakest([m.attribution or result.attribution for m in messages])
     lines = [
         f"# {title} — {day}",
         "",
-        f"> Источник: {parser_label}. Надёжность авторства — `{result.attribution}`.",
+        f"> Источник: {parser_label}. Надёжность авторства — `{attribution}`.",
         "",
     ]
-    if result.attribution != "reliable":
+    if attribution != "reliable":
         lines += [
             "> ⚠️ Имя над сообщением может принадлежать не автору, а тому, кто "
             "переслал. Цитировать по автору нельзя.",
+            "",
+            "> Надёжные сообщения в этом дне помечены: "
+            + (", ".join(sorted({
+                m.author for m in messages
+                if (m.attribution or result.attribution) == "reliable"
+            })) or "нет"),
             "",
         ]
     lines.append("---")
@@ -351,9 +362,23 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
                 day, chat_slug, f"chat-{stamp}"))
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
+        # Надёжность дня — по самому слабому сообщению в нём: материал не может
+        # быть надёжнее того, что в него вошло.
+        day_attribution = weakest(
+            [m.attribution or result.attribution for m in messages]
+        )
+        day_note = fidelity_note
+        if day_attribution != result.attribution:
+            weak = [m.author for m in messages
+                    if (m.attribution or result.attribution) != "reliable"]
+            day_note = "; ".join(filter(None, [
+                fidelity_note or f"импортировано из «{parser_obj.label}»",
+                f"надёжность понижена до `{day_attribution}` из-за сообщений: "
+                + ", ".join(sorted(set(weak))[:5]),
+            ]))
         manifest["items"].append(new_item(
             id=next_id(manifest), source="telegram", fidelity=fidelity,
-            fidelity_note=fidelity_note, attribution=result.attribution,
+            fidelity_note=day_note, attribution=day_attribution,
             origin=f"«{result.title}», {parser_obj.label}",
             date=day,
             participants=sorted({m.author for m in messages}),
