@@ -101,24 +101,29 @@ class HeraldInboxParser(Parser):
             author, via, attribution = _authorship(row)
             shown = str(row.get("origin_name") or "").strip()
             media = row.get("local_path")
-            text = str(row.get("text") or "")
+            note = None
             if row.get("file_id") and not media:
                 skipped_media += 1
-                # §3.5: пропуск фиксируется, а не замалчивается. Без этой
-                # пометки сообщение с недоехавшим голосовым выглядит в архиве
-                # как пустое, и отличить одно от другого нечем.
-                kind = str(row.get("media_kind") or "вложение")
-                text = (text + "\n\n" if text else "") + (
-                    f"<{kind}: в буфер не попало — {row.get('media_note') or 'файла нет'}>"
+                # §3.5 и §5: у материала, который существует, но не добыт,
+                # заводится запись `missing` — это задача, а не факт утраты.
+                # Для этого нужен ожидаемый путь: без него сообщение с
+                # недоехавшим голосовым не попадает в хвосты вовсе, и ни
+                # `gaps`, ни сводка о нём не узнают.
+                kind = str(row.get("media_kind") or "file")
+                name = str(row.get("file_name") or f"{kind}-{row.get('message_id')}")
+                media = f"files/{row.get('chat_slug')}/{row.get('message_id')}_{name}"
+                note = (
+                    f"в буфер не попало: {row.get('media_note') or 'файла нет'}"
                 )
             result.messages.append(Message(
                 date=str(row.get("date") or ""),
                 author=author,
-                text=text,
+                text=str(row.get("text") or ""),
                 via=via,
                 media=media,
                 media_kind=MEDIA_KIND.get(str(row.get("media_kind") or "")),
                 shown_as=shown if author == UNKNOWN_AUTHOR and shown else None,
+                note=note,
                 msg_id=f"{row.get('chat_slug')}:{row.get('message_id')}",
                 reply_to=str(row.get("reply_to") or "") or None,
                 attribution=attribution,

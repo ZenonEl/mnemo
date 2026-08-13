@@ -96,7 +96,9 @@ def render_day(title: str, day: str, messages: list[Message], result: ParseResul
     # целиком: в одной пачке она бывает разной, и шапка, обещающая `reliable`
     # над сообщением с неустановленным автором, — то самое расхождение между
     # RAW и манифестом, против которого весь стандарт.
-    attribution = weakest([m.attribution or result.attribution for m in messages])
+    per_message = [m.attribution or result.attribution for m in messages]
+    attribution = weakest(per_message)
+    mixed = len(set(per_message)) > 1
     lines = [
         f"# {title} — {day}",
         "",
@@ -105,8 +107,11 @@ def render_day(title: str, day: str, messages: list[Message], result: ParseResul
     ]
     if attribution != "reliable":
         lines += [
-            "> ⚠️ Надёжность у сообщений в этом дне разная. Ненадёжные помечены "
-            "`⚠` в строке автора; по остальным авторство установлено.",
+            "> ⚠️ Ненадёжные сообщения помечены `⚠` в строке автора; цитировать "
+            "их по автору нельзя."
+            + (" Надёжность в этом дне разная: остальные сообщения опознаны."
+               if mixed else
+               " Надёжных сообщений в этом дне нет."),
             "",
         ]
     lines.append("---")
@@ -140,6 +145,12 @@ def render_day(title: str, day: str, messages: list[Message], result: ParseResul
                 lines.append(f"{kind}: [`{Path(stored).name}`](../../{stored})")
             else:
                 lines.append(f"{kind}: `{Path(message.media).name}` — файл не найден")
+        if message.note:
+            # Пояснение инструмента печатается как есть: экранирование §8а.3
+            # предназначено для чужого текста, и превращать собственную пометку
+            # в `&lt;…&gt;` значит делать её нечитаемой.
+            lines.append("")
+            lines.append(f"_{message.note}_")
         lines.append("")
     return "\n".join(lines)
 
@@ -222,7 +233,11 @@ def print_plan(parser_obj, result: ParseResult, plan: dict, source: Path,
     print(f"дней:             {len(plan['days'])}  "
           f"({min(plan['days'], default='—')} … {max(plan['days'], default='—')})")
     print(f"достоверность:    {parser_obj.max_fidelity}")
-    print(f"авторство:        {result.attribution}")
+    per_message = [m.attribution or result.attribution for m in plan["messages"]]
+    aggregate = weakest(per_message) if per_message else result.attribution
+    spread = sorted(set(per_message))
+    print(f"авторство:        {aggregate}"
+          + (f"  (в пачке: {', '.join(spread)})" if len(spread) > 1 else ""))
     print()
     print("авторы (после раскрытия пересылок):")
     for name, count in plan["authors"].most_common():
@@ -361,6 +376,7 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
     # Медиа раскладывается до рендера: транскрипт ссылается на конечные пути,
     # а не на имена из чужой раскладки.
     media_paths: dict[str, str] = {}
+    linkable: dict[str, str] = {}
     claimed: set[str] = set()
     for message in fresh:
         if not message.media or message.media in media_paths:
@@ -376,10 +392,15 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
             chosen = claim_path(chosen.with_name(f"{chosen.stem}-x{chosen.suffix}"))
         claimed.add(chosen.relative_to(export).as_posix())
         media_paths[message.media] = chosen.relative_to(export).as_posix()
+        # Путь резервируется всем — он нужен и хвосту, чтобы у записи `missing`
+        # было место. Но ссылку в транскрипт ставим только на существующий файл:
+        # битая ссылка нарушает §1, обещающий чтение без инструмента.
+        if resolve_media(source, message.media) is not None:
+            linkable[message.media] = media_paths[message.media]
 
     # --- дневные транскрипты ---
     for day, messages in plan["days"].items():
-        body = render_day(result.title, day, messages, result, parser_obj.label, media_paths)
+        body = render_day(result.title, day, messages, result, parser_obj.label, linkable)
         name = message_filename(day, chat_slug, "chat")
         target = export / RAW_ZONES["message"] / name
         if target.exists():
