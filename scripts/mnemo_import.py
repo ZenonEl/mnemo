@@ -67,6 +67,18 @@ SOURCE_BY_KIND = {"voice": "voice", "photo": "screenshot", "document": "other"}
 # Рендер сообщений
 # --------------------------------------------------------------------------
 
+def remember(manifest: dict, created: list[str], item: dict) -> dict:
+    """Добавить материал и запомнить его идентификатор.
+
+    Список своих идентификаторов — то, по чему откат отличает собственное
+    сохранение от чужого: соседний процесс, пишущий в тот же экспорт, их
+    содержать не может.
+    """
+    manifest["items"].append(item)
+    created.append(item["id"])
+    return item
+
+
 def media_note(message: Message, result: ParseResult, parser_label: str) -> str | None:
     """Пояснение к записи о вложении.
 
@@ -362,27 +374,31 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
             signal.signal(signal.SIGTERM, previous)
             armed = False
 
-    # Откатывать или нет, решает СОСТОЯНИЕ НА ДИСКЕ, а не момент. Любой флаг,
-    # выставляемый до или после сохранения, оставляет щель, в которую попадает
-    # сигнал: снимали обработчик после — успешный импорт превращался в
-    # уничтожение; снимали до — незащищённой оказалась вся сериализация
-    # манифеста. Проверка «манифест на диске вырос» щелей не имеет: сохранение
-    # атомарно, значит оно либо случилось, либо нет.
-    before = load_manifest(export)
-    baseline = (len(before.get("items", [])), len(before.get("imports", [])))
+    # Откатывать или нет, решает СОСТОЯНИЕ НА ДИСКЕ, а не момент: любой флаг,
+    # выставляемый до или после сохранения, оставляет щель для сигнала.
+    #
+    # Но спрашивать надо про СВОЮ запись, а не про любую. Сравнение размеров
+    # манифеста отвечало «сохранено» и тогда, когда в тот же экспорт писал
+    # соседний процесс, — и откат не срабатывал при обычной ошибке ввода-вывода,
+    # оставляя осиротевшие файлы. Ищем идентификаторы, которые создали мы:
+    # чужая запись их содержать не может.
+    created: list[str] = []
 
     def already_saved() -> bool:
+        if not created:
+            return False
         try:
             current = load_manifest(export)
-        except MnemoError:
+        except (MnemoError, OSError):
+            # Не смогли прочитать — считаем, что не сохранились: лишний откат
+            # оставляет поправимый беспорядок, пропущенный — неисправимый.
             return False
-        return (len(current.get("items", [])),
-                len(current.get("imports", []))) != baseline
+        return set(created) <= {item.get("id") for item in current.get("items", [])}
 
     committed: list[bool] = []
     try:
         return _apply(export, source, parser_obj, result, plan, written, committed,
-                      disarm)
+                      disarm, created)
     except BaseException:
         if committed or already_saved():
             # Манифест уже сохранён — точка невозврата пройдена, и «откат»
@@ -405,7 +421,8 @@ def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dic
 
 
 def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dict,
-           written: list[Path], committed: list[bool], disarm) -> dict:
+           written: list[Path], committed: list[bool], disarm,
+           created: list[str]) -> dict:
     manifest = load_manifest(export)
     stats = Counter()
     chat_slug = slugify(result.title)
@@ -437,7 +454,7 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
         target.parent.mkdir(parents=True, exist_ok=True)
         written.append(target)
         shutil.copy2(result.anchor, target)
-        manifest["items"].append(new_item(
+        remember(manifest, created, new_item(
             id=next_id(manifest), source="telegram",
             fidelity=parser_obj.max_fidelity,
             # Первоисточник содержит все сообщения разом, включая те, чьё
@@ -512,7 +529,7 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
                 f"надёжность понижена до `{day_attribution}` из-за сообщений: "
                 + ", ".join(sorted(set(weak))[:5]),
             ]))
-        manifest["items"].append(new_item(
+        remember(manifest, created, new_item(
             id=next_id(manifest), source="telegram", fidelity=fidelity,
             fidelity_note=day_note, attribution=day_attribution,
             origin=f"«{result.title}», {parser_obj.label}",
@@ -539,7 +556,7 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
         found = None if outside else resolve_media(source, message.media)
 
         if found is None:
-            manifest["items"].append(new_item(
+            remember(manifest, created, new_item(
                 id=next_id(manifest), source=SOURCE_BY_KIND[kind],
                 fidelity="placeholder",
                 attribution=message.attribution or result.attribution,
@@ -568,7 +585,7 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
         target.parent.mkdir(parents=True, exist_ok=True)
         written.append(target)
         shutil.copy2(found, target)
-        manifest["items"].append(new_item(
+        remember(manifest, created, new_item(
             id=next_id(manifest), source=SOURCE_BY_KIND[kind],
             fidelity="verbatim",
             attribution=message.attribution or result.attribution,
