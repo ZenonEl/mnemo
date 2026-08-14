@@ -115,6 +115,28 @@ class ReplyAuthorship(unittest.TestCase):
             ("Пётр Иванов", True),
         )
 
+    def test_forwarded_parent_uses_the_known_original_author(self) -> None:
+        self.assertEqual(
+            reply_authorship({
+                "kind": "message",
+                "author_name": "Пётр Иванов",
+                "origin_type": "user",
+                "origin_name": "Анна Смирнова",
+            }),
+            ("Анна Смирнова", True),
+        )
+
+    def test_forwarded_parent_does_not_claim_a_hidden_author(self) -> None:
+        self.assertEqual(
+            reply_authorship({
+                "kind": "message",
+                "author_name": "Пётр Иванов",
+                "origin_type": "hidden_user",
+                "origin_name": "Кто-то",
+            }),
+            ("Кто-то", False),
+        )
+
     def test_external_from_an_identified_user_is_confirmed(self) -> None:
         self.assertEqual(
             reply_authorship({"kind": "external", "origin_type": "user",

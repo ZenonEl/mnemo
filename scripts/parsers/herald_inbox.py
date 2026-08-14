@@ -197,6 +197,12 @@ def reply_authorship(context: dict) -> tuple[str | None, bool]:
     if kind == "quote":
         return None, False
     if kind == "message":
+        origin = str(context.get("origin_type") or "")
+        shown = str(context.get("origin_name") or "").strip()
+        if origin == "user" and shown:
+            return shown, True
+        if origin:
+            return (shown or None), False
         name = str(context.get("author_name") or "").strip()
         return (name or None), bool(name)
     origin = str(context.get("origin_type") or "")
