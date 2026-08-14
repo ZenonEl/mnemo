@@ -1038,9 +1038,78 @@ def cmd_remove(args) -> int:
     return 0
 
 
+def _update_person(export: Path, manifest: dict, args) -> int:
+    """Дописать человеку то, что узнали позже.
+
+    Реестр наполняется по мере знакомства с проектом: настоящее имя в
+    мессенджере всплывает через неделю после того, как человек заведён по
+    рабочему прозвищу. Без правки оставалось два выхода — завести дубль,
+    который сломает `whois`, или лезть в манифест руками, что запрещено §7 и
+    обходит проверку контракта в момент записи. Оба хуже отсутствующей команды.
+    """
+    person = next((p for p in manifest["people"] if p["id"] == args.id), None)
+    if person is None:
+        known = ", ".join(p["id"] for p in manifest["people"]) or "реестр пуст"
+        raise MnemoError(f"нет человека с id={args.id}. Есть: {known}")
+
+    if args.role and args.role != person["role"] and args.role == "self":
+        occupied = [p["id"] for p in manifest["people"]
+                    if p["role"] == "self" and p["id"] != person["id"]]
+        if occupied:
+            raise MnemoError(f"роль self уже занята: {occupied[0]}")
+
+    added = [a.strip() for a in (args.aliases or "").split(",") if a.strip()]
+    dropped = [a.strip() for a in (args.drop_alias or "").split(",") if a.strip()]
+
+    # Алиас, уже указывающий на ДРУГОГО человека, делает реестр бесполезным:
+    # `whois` вернёт первого попавшегося, и материал припишется не тому.
+    for name in added + ([args.display] if args.display else []):
+        clash = resolve_person(manifest, name)
+        if clash is not None and clash["id"] != person["id"]:
+            raise MnemoError(
+                f"«{name}» уже указывает на {clash['display']} ({clash['id']}). "
+                "Выбери другое имя или объедини записи вручную через remove."
+            )
+
+    # Алиасы накапливаются, а не заменяются: имена узнаются по одному, и
+    # перечислять каждый раз весь список — способ потерять половину.
+    aliases = [a for a in person.get("aliases", []) if a not in dropped]
+    for alias in added:
+        if alias not in aliases:
+            aliases.append(alias)
+
+    handles = dict(person.get("handles", {}))
+    for key in ("github", "telegram", "email"):
+        value = getattr(args, key, None)
+        if value:
+            handles[key] = value
+
+    updated = new_person(
+        id=person["id"],
+        display=args.display or person["display"],
+        role=args.role or person["role"],
+        aliases=aliases,
+        handles=handles,
+        note=args.note if args.note is not None else person.get("note"),
+    )
+    manifest["people"][manifest["people"].index(person)] = updated
+    save_manifest(export, manifest)
+    from mnemo_render import sync
+    sync(export, rehash=False)
+    print(f"{updated['id']}  {updated['role']}  {updated['display']}")
+    if updated["aliases"]:
+        print(f"  также: {', '.join(updated['aliases'])}")
+    if updated["handles"]:
+        print("  " + " ".join(f"{k}:{v}" for k, v in updated["handles"].items()))
+    return 0
+
+
 def cmd_people(args) -> int:
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
+
+    if args.id and not args.add:
+        return _update_person(export, manifest, args)
 
     if not args.add:
         if not manifest["people"]:
@@ -1085,7 +1154,7 @@ def cmd_people(args) -> int:
             handles[key] = value
 
     person = new_person(
-        id=person_id, display=args.display, role=args.role,
+        id=person_id, display=args.display, role=args.role or "other",
         aliases=[a.strip() for a in (args.aliases or "").split(",") if a.strip()],
         handles=handles, note=args.note,
     )
@@ -1242,14 +1311,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_people = sub.add_parser("people", help="реестр людей: кто есть кто")
     p_people.add_argument("--export", default=".")
     p_people.add_argument("--add", action="store_true")
-    p_people.add_argument("--id", default=None, help="устойчивый ключ; по умолчанию из display")
+    p_people.add_argument("--id", default=None,
+                          help="устойчивый ключ; с --add задаёт его, без --add — правит "
+                               "существующего: алиасы дописываются, остальное заменяется")
     p_people.add_argument("--display", default=None, help="как называть в отчётах")
-    p_people.add_argument("--role", choices=PERSON_ROLES, default="other")
+    # Без значения по умолчанию: при правке «не задано» обязано отличаться от
+    # «задано other», иначе дописывание алиаса молча сбрасывало роль клиента.
+    p_people.add_argument("--role", choices=PERSON_ROLES, default=None)
     p_people.add_argument("--aliases", default="", help="через запятую: как он выглядит в источниках")
     p_people.add_argument("--github", default=None)
     p_people.add_argument("--telegram", default=None)
     p_people.add_argument("--email", default=None)
     p_people.add_argument("--note", default=None)
+    p_people.add_argument("--drop-alias", dest="drop_alias", default=None,
+                          help="убрать алиасы, через запятую (только при правке)")
     p_people.set_defaults(func=cmd_people)
 
     p_who = sub.add_parser("whois", help="кто скрывается за именем из источника")
