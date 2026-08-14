@@ -153,6 +153,7 @@ class HeraldInboxParser(Parser):
                 note=note,
                 msg_id=f"{row.get('chat_slug')}:{row.get('message_id')}",
                 reply_to=str(row.get("reply_to") or "") or None,
+                reply_context=_reply_context(row.get("reply_context")),
                 attribution=attribution,
             ))
             if row.get("media_note"):
@@ -165,6 +166,48 @@ class HeraldInboxParser(Parser):
             )
         result.participants = sorted({m.author for m in result.messages if m.author})
         return result
+
+
+def _reply_context(raw) -> dict | None:
+    """Снимок родителя как он пришёл от буфера.
+
+    Поле необязательное: бандлы, собранные до его появления, импортируются как
+    прежде. Строку тоже принимаем — буфер хранит контекст в JSON, и при ручной
+    сборке он мог остаться нераспакованным.
+    """
+    if isinstance(raw, dict):
+        return raw or None
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def reply_authorship(context: dict) -> tuple[str | None, bool]:
+    """Кто автор родителя и можно ли его так называть.
+
+    Те же правила, что у пересылок (§4а.3): показанное имя автором объявляется
+    только когда источник его подтверждает. Для `external` решает `origin_type`,
+    для `quote` автора нет вовсе — Telegram его не сообщает.
+    """
+    kind = context.get("kind")
+    if kind == "quote":
+        return None, False
+    if kind == "message":
+        name = str(context.get("author_name") or "").strip()
+        return (name or None), bool(name)
+    origin = str(context.get("origin_type") or "")
+    shown = str(context.get("origin_name") or "").strip()
+    if origin == "user" and shown:
+        return shown, True
+    if shown:
+        # Скрывший себя отправитель, чат или канал: имя показать можно,
+        # автором объявлять нельзя.
+        return shown, False
+    return None, False
 
 
 def _authorship(row: dict) -> tuple[str, str | None, str]:

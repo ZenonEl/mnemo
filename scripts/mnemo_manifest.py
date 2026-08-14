@@ -1108,7 +1108,11 @@ def cmd_people(args) -> int:
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
 
-    if args.id and not args.add:
+    if args.update and args.add:
+        raise MnemoError("--add и --update взаимоисключающи: заводим или правим")
+    if args.update and not args.id:
+        raise MnemoError("--update требует --id: неявно человек не создаётся")
+    if (args.update or args.id) and not args.add:
         return _update_person(export, manifest, args)
 
     if not args.add:
@@ -1323,6 +1327,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_people.add_argument("--telegram", default=None)
     p_people.add_argument("--email", default=None)
     p_people.add_argument("--note", default=None)
+    p_people.add_argument("--update", action="store_true",
+                          help="править существующего по --id; алиасы и хендлы "
+                               "дописываются, остальное заменяется")
     p_people.add_argument("--drop-alias", dest="drop_alias", default=None,
                           help="убрать алиасы, через запятую (только при правке)")
     p_people.set_defaults(func=cmd_people)

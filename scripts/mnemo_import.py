@@ -98,6 +98,62 @@ def media_note(message: Message, result: ParseResult, parser_label: str) -> str 
     )
 
 
+def render_reply(context: dict, present: set[str]) -> list[str]:
+    """Строки про то, на какое сообщение дан ответ.
+
+    Связь ответа с исходным сообщением — половина смысла переписки: без неё
+    «согласовал» висит в воздухе. Bot API отдаёт ровно один уровень вложения,
+    поэтому больше и не бывает.
+
+    Три правила, и все три про то, чтобы не выдумать лишнего:
+
+    - автора родителя называем только когда источник его подтверждает
+      (§4а.3): у `external` решает `origin_type`, у `quote` автора нет вовсе;
+    - полный текст родителя показываем, только если его нет отдельной строкой
+      в этой же пачке — иначе он лёг бы в транскрипт дважды;
+    - цитата приводится дословно и не пересказывается: она и есть то, на что
+      человек показал пальцем.
+    """
+    from parsers.herald_inbox import reply_authorship
+
+    kind = str(context.get("kind") or "")
+    author, confirmed = reply_authorship(context)
+    number = context.get("message_id")
+    when = str(context.get("date") or context.get("origin_date") or "")[11:16]
+
+    head = "↩ Ответ"
+    if number:
+        head += f" на #{number}"
+    if when:
+        head += f" · {when}"
+    if author:
+        head += f" · {author}" if confirmed else f" · показано имя: {author}"
+    elif kind != "quote":
+        head += " · автор не установлен"
+    if kind == "external":
+        head += " · сообщение вне захвата"
+
+    lines = ["", f"> {head}"]
+    quote = context.get("quote") or {}
+    quoted = str(quote.get("text") or "").strip()
+    if quoted:
+        for piece in escape_md(quoted).splitlines() or [""]:
+            lines.append(f"> «{piece}»")
+        return lines
+
+    # Текста нет только у `external` и `quote` — Telegram его не даёт, и
+    # придумывать нечего.
+    body = str(context.get("text") or "").strip()
+    if body and str(number) not in present:
+        for piece in escape_md(body).splitlines():
+            lines.append(f"> {piece}" if piece else ">")
+    elif body:
+        lines.append("> _текст родителя ниже в этом же дне_")
+    elif kind != "message":
+        lines.append("> _текст недоступен: сообщение вне захвата_")
+    return lines
+
+
 def render_day(title: str, day: str, messages: list[Message], result: ParseResult,
                parser_label: str, media_paths: dict[str, str]) -> str:
     """Дневной транскрипт в markdown.
@@ -131,6 +187,12 @@ def render_day(title: str, day: str, messages: list[Message], result: ParseResul
     lines.append("---")
     lines.append("")
 
+    # Номера сообщений, которые и так лежат в этом дне: их родительский текст
+    # повторять незачем.
+    present = {
+        str(m.msg_id).rsplit(":", 1)[-1] for m in messages if m.msg_id
+    }
+
     for message in messages:
         time = message.date[11:16] or "??:??"
         who = message.author
@@ -144,6 +206,8 @@ def render_day(title: str, day: str, messages: list[Message], result: ParseResul
         if message.via:
             who += f" _(переслал: {message.via})_"
         lines.append(f"### {time} · {who}")
+        if message.reply_context:
+            lines += render_reply(message.reply_context, present)
         if message.text:
             lines.append("")
             lines.append(escape_md(message.text))
