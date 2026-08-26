@@ -51,23 +51,27 @@ mnemo фиксирует это как формат:
 ### Claude Code
 
 ```bash
-git clone https://github.com/ZenonEl/mnemo ~/.claude/plugins/mnemo
+claude plugin marketplace add ZenonEl/mnemo
+claude plugin install mnemo@mnemo
 ```
+
+То же из сессии: `/plugin marketplace add ZenonEl/mnemo`, затем
+`/plugin install mnemo@mnemo`. Обновление — `claude plugin update mnemo@mnemo`
+и рестарт.
 
 ### Codex
 
-Каталог скила подключается ссылкой в личный каталог скилов — тот же файл, что
-читает Claude Code, без второй копии:
-
 ```bash
 git clone https://github.com/ZenonEl/mnemo ~/GitHub/mnemo
-mkdir -p ~/.agents/skills
-ln -s ~/GitHub/mnemo/skills/chat-export ~/.agents/skills/chat-export
+mkdir -p ~/.codex/skills
+ln -s ~/GitHub/mnemo ~/.codex/skills/mnemo
 ```
 
-Скил доступен как `$chat-export`; новая сессия подхватит его автоматически.
-Архив объявляется в `AGENTS.md` хост-проекта — при создании добавьте
-`--instructions-file AGENTS.md`.
+Ссылка, а не копия: копия — второй экземпляр стандарта, расходящийся с
+репозиторием молча. Обновление — `git pull` в клоне.
+
+**В обоих хостах скил зовётся `mnemo:chat-export`** и читается из одного и того
+же файла.
 
 Зависимостей нет — скрипты работают на голой стандартной библиотеке Python 3.
 
