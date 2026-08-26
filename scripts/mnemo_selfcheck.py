@@ -217,14 +217,40 @@ def check(root: Path) -> list[str]:
     # установках ничего не меняется.
     problems += check_private_terms(root)
 
-    # 4. Команды: файл на каждую и версия плагина совпадает с манифестом рынка.
+    # 4. Команды: файл на каждую и версия одинакова во всех манифестах.
+    #
+    # Манифестов три: два у Claude Code и один у Codex. Обновление в обоих хостах
+    # сверяет ТОЛЬКО версию — отставший манифест означает, что правка не доедет
+    # до установленных копий, а команда обновления отрапортует, что всё свежее.
+    # Расходятся они молча, поэтому сверка здесь, а не в голове.
     plugin = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     market = json.loads((root / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
-    market_version = market["plugins"][0]["version"]
-    if plugin["version"] != market_version:
-        problems.append(
-            f"plugin.json {plugin['version']} против marketplace.json {market_version}"
-        )
+    codex = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    versions = {
+        ".claude-plugin/plugin.json": plugin["version"],
+        ".claude-plugin/marketplace.json": market["plugins"][0]["version"],
+        ".codex-plugin/plugin.json": codex["version"],
+    }
+    if len(set(versions.values())) > 1:
+        problems.append("версии манифестов разошлись: "
+                        + ", ".join(f"{f} {v}" for f, v in versions.items()))
+    if codex.get("name") != plugin.get("name"):
+        problems.append(f"имя плагина разное: {plugin.get('name')} против {codex.get('name')}")
+    if codex.get("skills") != "./skills/":
+        problems.append('.codex-plugin/plugin.json должен указывать "skills": "./skills/" — '
+                        "иначе Codex не найдёт тот же навык, что читает Claude Code")
+
+    # Запись в рынке Codex обязана указывать на корень репозитория: путь мимо
+    # корня даёт установку без scripts/ и SPEC/, и навык ломается уже у человека.
+    codex_market = json.loads(
+        (root / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8"))
+    entry = codex_market["plugins"][0]
+    if entry.get("name") != plugin.get("name"):
+        problems.append("запись в .agents/plugins/marketplace.json названа "
+                        f"{entry.get('name')}, а плагин — {plugin.get('name')}")
+    if entry.get("source", {}).get("path") != "./":
+        problems.append('.agents/plugins/marketplace.json: source.path должен быть "./" — '
+                        "плагин занимает весь репозиторий, а не подкаталог")
 
     # 5. Скрипты, упомянутые в навыке, существуют.
     skill = (root / "skills" / "chat-export" / "SKILL.md").read_text(encoding="utf-8")

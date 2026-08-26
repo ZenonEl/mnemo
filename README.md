@@ -62,13 +62,14 @@ claude plugin install mnemo@mnemo
 ### Codex
 
 ```bash
-git clone https://github.com/ZenonEl/mnemo ~/GitHub/mnemo
-mkdir -p ~/.codex/skills
-ln -s ~/GitHub/mnemo ~/.codex/skills/mnemo
+codex plugin marketplace add ZenonEl/mnemo
+codex plugin add mnemo@mnemo
 ```
 
-Ссылка, а не копия: копия — второй экземпляр стандарта, расходящийся с
-репозиторием молча. Обновление — `git pull` в клоне.
+Обновление — `codex plugin marketplace upgrade`, затем `codex plugin add` заново.
+
+Копировать репозиторий в `~/.codex/skills/` не надо: копия — второй экземпляр
+стандарта, расходящийся с оригиналом молча.
 
 **В обоих хостах скил зовётся `mnemo:chat-export`** и читается из одного и того
 же файла.
