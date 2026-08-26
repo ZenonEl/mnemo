@@ -24,7 +24,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.14"
+SPEC_VERSION = "1.15"
 SPEC_MAJOR = 1
 
 # Предел на слаг в имени файла. Имя складывается из даты, слага и имени

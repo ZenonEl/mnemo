@@ -106,6 +106,32 @@ class PeopleUpdate(unittest.TestCase):
         self.assertEqual(len(self.people()), 1)
 
 
+class AgentInstructions(unittest.TestCase):
+    """Один архив объявляется обоим агентам одинаково.
+
+    Codex читает `AGENTS.md`, Claude Code — `CLAUDE.md`. Различаться должен
+    только адрес файла: разошедшийся текст завёл бы два набора правил на один
+    архив, и проект, над которым работают оба, получил бы их вперемешку.
+    """
+
+    def announce(self, instructions_file: str) -> str:
+        host = Path(tempfile.mkdtemp())
+        done = run("init", "--dir", str(host / "_chat-export"), "--slug", "demo",
+                   "--instructions-file", instructions_file)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        other = "AGENTS.md" if instructions_file == "CLAUDE.md" else "CLAUDE.md"
+        self.assertFalse((host / other).exists(), f"{other} создан вдобавок")
+        return (host / instructions_file).read_text(encoding="utf-8")
+
+    def test_codex_is_told_in_agents_md(self) -> None:
+        text = self.announce("AGENTS.md")
+        self.assertIn("<!-- mnemo:archive:demo -->", text)
+        self.assertIn("ctx:demo#iNNN", text)
+
+    def test_both_hosts_are_told_the_same_thing(self) -> None:
+        self.assertEqual(self.announce("AGENTS.md"), self.announce("CLAUDE.md"))
+
+
 class ReplyAuthorship(unittest.TestCase):
     """§4а.3: показанное имя объявляется автором только с подтверждением."""
 

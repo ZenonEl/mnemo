@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mnemo"
+  short_description: "Архив рабочего контекста с провенансом"
+  default_prompt: "Разбери переписку и вложения по проекту в проверяемый архив mnemo."

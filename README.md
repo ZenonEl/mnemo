@@ -1,6 +1,6 @@
 # mnemo
 
-**Единый стандарт чат-экспортов — как плагин Claude Code.**
+**Единый стандарт чат-экспортов — для Claude Code и Codex.**
 
 Переписка с заказчиком, ТЗ в `.docx`, скрины, транскрипты созвонов складываются в
 архив, у которого известно происхождение каждого куска и который проверяется
@@ -48,9 +48,26 @@ mnemo фиксирует это как формат:
 
 ## Установка
 
+### Claude Code
+
 ```bash
 git clone https://github.com/ZenonEl/mnemo ~/.claude/plugins/mnemo
 ```
+
+### Codex
+
+Каталог скила подключается ссылкой в личный каталог скилов — тот же файл, что
+читает Claude Code, без второй копии:
+
+```bash
+git clone https://github.com/ZenonEl/mnemo ~/GitHub/mnemo
+mkdir -p ~/.agents/skills
+ln -s ~/GitHub/mnemo/skills/chat-export ~/.agents/skills/chat-export
+```
+
+Скил доступен как `$chat-export`; новая сессия подхватит его автоматически.
+Архив объявляется в `AGENTS.md` хост-проекта — при создании добавьте
+`--instructions-file AGENTS.md`.
 
 Зависимостей нет — скрипты работают на голой стандартной библиотеке Python 3.
 

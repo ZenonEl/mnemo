@@ -189,8 +189,9 @@ def _safe_span(text: str) -> str:
     return flat.replace("`", "'")
 
 
-def announce_in_claude_md(export: Path, slug: str) -> str:
-    """Прописать архив в CLAUDE.md проекта.
+def announce_in_instructions(export: Path, slug: str,
+                             instructions_file: str = "CLAUDE.md") -> str:
+    """Прописать архив в файле инструкций агента проекта.
 
     Пять замеров подряд показали одно: `INDEX.md` открывали ноль раз в четырёх
     независимых проектах. Не потому что он плох — потому что **сессия не знает,
@@ -205,21 +206,21 @@ def announce_in_claude_md(export: Path, slug: str) -> str:
     нужен не список материалов, а список выводов и открытого.
     """
     host = export.parent
-    target = host / "CLAUDE.md"
+    target = host / instructions_file
     if target.is_symlink():
         # Дописывание пошло бы по ссылке — в файл вне проекта, о котором человек
         # ничего не узнает.
-        return ("⚠️ CLAUDE.md — символическая ссылка, дописывать не буду: "
+        return (f"⚠️ {instructions_file} — символическая ссылка, дописывать не буду: "
                 "запись ушла бы за пределы проекта. Пропиши архив вручную")
     if target.exists() and not target.is_file():
-        return "⚠️ CLAUDE.md не обычный файл — пропиши архив вручную"
+        return f"⚠️ {instructions_file} не обычный файл — пропиши архив вручную"
 
     existing = target.read_text(encoding="utf-8") if target.is_file() else ""
     # Метка своя у каждого экспорта: общая помечала файл как обработанный, и
     # второй архив в том же проекте молча не объявлялся при рапорте «уже прописан».
     mark = f"<!-- mnemo:archive:{slug} -->"
     if mark in existing:
-        return "уже прописан в CLAUDE.md"
+        return f"уже прописан в {instructions_file}"
 
     name = _safe_span(export.name)
     slug = _safe_span(slug)
@@ -233,19 +234,21 @@ def announce_in_claude_md(export: Path, slug: str) -> str:
 ## Архив контекста — `{name}/`
 
 Дословный архив материалов проекта с провенансом: переписка, документы, скрины,
-голосовые. Ведётся плагином mnemo.
+голосовые. Ведётся mnemo.
 
 **Начинать отсюда, а не с поиска по репе:**
 
 - `{name}/summaries/findings-log.md` — что уже выяснено. Читать при возврате к работе.
-- `/mnemo:audit` — всё ли сделано, как хотел заказчик; что блокирует; что не спрошено.
+- Аудит архива — всё ли сделано, как хотел заказчик; что блокирует; что не
+  спрошено. В Claude Code это `/mnemo:audit`, в Codex — скил `$chat-export`.
 - `{name}/INDEX.md` — что вообще есть и откуда. Когда ищешь конкретный материал.
 
 **Правила:**
 
 - Цитировать: `ctx:{slug}#iNNN` (слаг экспорта, не имя каталога). Уровень достоверности обязателен — `digest`
   (конспект, машинная расшифровка) **нельзя** приводить как чьи-то слова.
-- Пополнять командами `/mnemo:import`, `/mnemo:add-*`, `/mnemo:req`, `/mnemo:ask`.
+- Пополнять операциями mnemo: `import`, `add-text`, `add-files`, `req`, `ask`.
+  В Claude Code — одноимённые команды `/mnemo:*`.
   `MANIFEST.json` и `INDEX.md` руками не править.
 - Требование заказчика в состоянии `done` обязано нести доказательство.
 """
@@ -368,7 +371,9 @@ def cmd_init(args) -> int:
     # стандарта). Порядок здесь — не стилистика: наоборот было бы окном, в
     # котором рабочий материал уже лежит в отслеживаемом каталоге.
     git_note = exclude_from_git(export)
-    claude_note = announce_in_claude_md(export, manifest["export"]["slug"])
+    instructions_note = announce_in_instructions(
+        export, manifest["export"]["slug"], args.instructions_file
+    )
 
     # Собираем производные сразу: пустой, но валидный экспорт лучше «почти
     # созданного», на котором линтер падает по V07.
@@ -378,11 +383,11 @@ def cmd_init(args) -> int:
     print(f"экспорт создан: {export}")
     print(f"  slug: {manifest['export']['slug']}")
     print(f"  git:  {git_note}")
-    print(f"  CLAUDE.md: {claude_note}")
-    if ("прописан в CLAUDE.md" in claude_note
+    print(f"  {args.instructions_file}: {instructions_note}")
+    if (f"прописан в {args.instructions_file}" in instructions_note
             and git_status(export.parent)[0] == "repo"
-            and not is_git_ignored(export.parent / "CLAUDE.md")):
-        # CLAUDE.md — обычный файл проекта и попадает в коммит. В нём теперь
+            and not is_git_ignored(export.parent / args.instructions_file)):
+        # Файл инструкций — обычный файл проекта и попадает в коммит. В нём теперь
         # стоит имя каталога экспорта, а оно часто совпадает с именем клиента.
         #
         # Проверка на репозиторий обязательна: `check-ignore` вне git отвечает
@@ -390,7 +395,7 @@ def cmd_init(args) -> int:
         # там, где истории нет вовсе — строкой ниже сообщения «хост-проект не
         # под git». Предупреждение, которое противоречит соседней строке, учит
         # не читать предупреждения.
-        print("             ⚠️ CLAUDE.md отслеживается git — имя каталога уедет "
+        print(f"             ⚠️ {args.instructions_file} отслеживается git — имя каталога уедет "
               "в историю репозитория. Проверь перед коммитом")
     if export.name != DEFAULT_EXPORT_DIR:
         # Однократная подсказка при создании, а не правило линтера: принятые
@@ -1213,6 +1218,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--participants", default="",
                         help="отображаемые имена через запятую; полноценный реестр "
                              "заводится отдельно командой people")
+    p_init.add_argument("--instructions-file", choices=("CLAUDE.md", "AGENTS.md"),
+                        default="CLAUDE.md",
+                        help="куда объявить архив для следующих сессий агента")
     p_init.set_defaults(func=cmd_init)
 
     p_file = sub.add_parser("add-file", help="положить файл в RAW")
