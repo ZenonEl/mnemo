@@ -35,7 +35,8 @@ from mnemo_core import (  # noqa: E402
     RAW_ZONES, REDACTION_REASONS,
     SOURCES, STATUSES, MnemoError, ensure_skeleton, empty_manifest, find_export,
     contained, find_item, load_manifest, message_filename, new_item, new_person,
-    blocked_since, find_record, new_question, new_redaction, new_requirement,
+    blocked_since, escalation, find_record, missing_attempt, new_question,
+    new_redaction, new_requirement,
     export_lock, next_id, question_state, similar_records,
     parse_day, rel, resolve_person, save_manifest, sha256_file, slugify, today,
 )
@@ -311,6 +312,29 @@ def write_stubs(export: Path) -> None:
 # --------------------------------------------------------------------------
 # Общие флаги метаданных
 # --------------------------------------------------------------------------
+
+def add_attempt_args(parser: argparse.ArgumentParser) -> None:
+    """Поля попытки и исход прохода — одинаковые у требования и у вопроса.
+
+    Блокировка — поле у обоих (§Блокировка), поэтому и предъявление попытки
+    общее: два разных набора флагов на одну сущность разошлись бы при первой
+    же правке.
+    """
+    parser.add_argument("--tried", default=None,
+                        help="что конкретно сделал: команда, запрос, файл, человек, "
+                             "которому написали")
+    parser.add_argument("--returned", default=None,
+                        help="что вернулось дословно: ошибка, отказ, таймаут, "
+                             "молчание с датой")
+    parser.add_argument("--dead-end", dest="dead_end", default=None,
+                        help="что должно измениться СНАРУЖИ, чтобы сдвинулось. "
+                             "Пусто — блокировка остаётся нашей (escalation=ours)")
+    parser.add_argument("--pass-outcome", dest="pass_outcome", default=None,
+                        choices=PASS_OUTCOMES,
+                        help="исход прохода самоопровержения: refuted (найден обход), "
+                             "confirmed (та же стена, нужна вторая улика в --returned), "
+                             "insufficient (новой попытки не нашлось)")
+
 
 def add_meta_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source", choices=SOURCES, required=True)
@@ -650,26 +674,39 @@ def cmd_rehash(args) -> int:
 
 QUESTION_GATE = {
     "impact": ("--impact", "что меняется от ответа — назови, что конкретно будет "
-                           "сделано иначе; если ничего, это не вопрос, а любопытство"),
+                           "сделано иначе; если ничего, это не вопрос, а любопытство. "
+                           "И проверь, что иначе будет делать НАША работа: «кто "
+                           "продавец», «какой договор у платёжки» — вопросы с "
+                           "владельцем, но меняют они не у нас"),
     "asked_of": ("--asked-of", "кому адресован — человек из реестра; если адресата "
                                "нет, вопрос вне нашей компетенции либо это наше "
                                "собственное решение, а не вопрос"),
     "based_on": ("--based-on", "из какого материала возник — ссылка ctx:; вопрос без "
                                "основания взят из головы, а не из работы"),
+    "self_attempt": ("--self-attempt",
+                     "что ты сделал сам, чтобы его закрыть: что искал, что "
+                     "прочитал, что попробовал и почему не закрылось. Вопрос "
+                     "обязан пережить собственную попытку — половина «открытых» "
+                     "растворяется от минуты поиска в документации платформы или "
+                     "в предыдущем проекте"),
 }
 
 
 def gate_question(values: dict) -> None:
-    """Три поля, без которых новый вопрос не заводится.
+    """Четыре поля, без которых новый вопрос не заводится.
 
     Запись в архив ничего не стоит, и поэтому в него натекает. Инструмент умел
     проверять, насколько правдив материал, и не умел спрашивать, заслуживает ли
     запись существования. На живом проекте это дало двадцать открытых вопросов,
     из которых ни один не был задан никому.
 
-    Все три поля существовали и раньше — необязательными. Обязательными они
-    отсекают ровно три вида мусора: вопрос, от ответа на который ничего не
-    меняется; вопрос не к кому; вопрос не из материала.
+    Три первых поля существовали и раньше — необязательными. Обязательными они
+    отсекают три вида мусора: вопрос, от ответа на который ничего не меняется;
+    вопрос не к кому; вопрос не из материала. Они НЕ отсекают четвёртый вид —
+    вопрос, который формально влияет и формально имеет адресата, но закрылся бы
+    сам, если бы спрашивающий потратил на него минуту. Это и делает
+    `self_attempt`: заслон симметричен полям попытки у блокировки, и по той же
+    причине — оба требуют предъявить попытку, а не вывод.
 
     Предупреждением это делать бессмысленно: предупреждение, которое можно
     пропустить, пропускают на третий день — тот же механизм, из-за которого
@@ -679,14 +716,190 @@ def gate_question(values: dict) -> None:
                if not str(values.get(field) or "").strip()]
     if not missing:
         return
-    lines = ["новый вопрос требует всех трёх полей — иначе он засоряет архив:"]
+    lines = [f"новый вопрос требует всех {len(QUESTION_GATE)} полей — "
+             "иначе он засоряет архив:"]
     for flag, why in missing:
         lines.append(f"    {flag}")
         lines.append(f"        {why}")
     lines.append("")
+    lines.append("Прежде чем заполнять, проверь ещё три вещи, которых команда не видит:")
+    lines.append("  дешёвый дефолт — можешь сам сказать «скорее всего ___»? Тогда не")
+    lines.append("      спрашивай, а понизь до допущения: --assumed + --cost-if-wrong.")
+    lines.append("  своевременность — блокирует СЕЙЧАС или встанет через две недели?")
+    lines.append("      Внимание собеседника тратится один раз, вводные к тому")
+    lines.append("      моменту поменяются.")
+    lines.append("  наводка — назови одной фразой, чего именно не знаешь, и сверь с")
+    lines.append("      текстом вопроса. «Точно ли эта платёжка» и «есть ли договор")
+    lines.append("      с ней» — тема одна, вопрос мимо.")
+    lines.append("")
     lines.append("Если ответ на два из них «не знаю» — вопрос ещё не созрел,")
     lines.append("и место ему не в архиве, а в голове.")
     raise MnemoError("\n".join(lines))
+
+
+# Слова, из которых состоит отчёт о попытке, которой не было. Список намеренно
+# короткий и закрытый: он ловит не «плохую формулировку», а её отсутствие —
+# отглагольное существительное без объекта. «Разбирался», «изучал вопрос»,
+# «пытался понять», «не получилось» — здесь нет ни действия, ни результата,
+# который можно перепроверить.
+VAGUE_WORDS = {
+    "разбирался", "разбиралась", "разбирал", "разбирала", "разобраться",
+    "поразбираться", "изучал", "изучала", "изучил", "изучила", "изучать",
+    "искал", "искала", "поискать", "смотрел", "смотрела", "посмотреть",
+    "пытался", "пыталась", "пробовал", "пробовала", "попробовать",
+    "думал", "думала", "подумать", "гуглил", "гуглила", "читал", "читала",
+    "понять", "понимал", "выяснял", "выяснить", "копал", "копался",
+    "вопрос", "вопросы", "вопроса", "тему", "темы", "это", "этого", "всё",
+    "все", "ничего", "ничто", "долго", "много", "немного", "как", "почему",
+    "что", "там", "тут", "сам", "сама", "сами", "мне", "нам", "надо", "нужно",
+    "ещё", "еще", "не", "получилось", "получается", "вышло", "работает",
+    "работало", "и", "а", "но", "же", "бы", "в", "на", "с", "по",
+}
+
+
+def _words(value: str) -> list[str]:
+    cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in str(value).lower())
+    return cleaned.split()
+
+
+def is_vague(value: str) -> bool:
+    """Состоит ли значение целиком из слов, ничего не сообщающих.
+
+    Проверка — пол, а не потолок: она не судит о качестве, она отказывает в
+    приёме отчёта, в котором нет ни одного слова про предмет. Ровно как
+    `gate_question` видит только непустоту, а содержательную работу выносит в
+    текст отказа. Одного постороннего слова — имени человека, файла, команды,
+    системы — достаточно, чтобы значение прошло.
+    """
+    words = _words(value)
+    if not words:
+        return True
+    return all(word in VAGUE_WORDS for word in words)
+
+
+ATTEMPT_GATE = {
+    "tried": ("--tried", "конкретное совершённое действие: команда, запрос, файл, "
+                         "человек, которому написали"),
+    "returned": ("--returned", "что вернулось дословно: текст ошибки, отказ, "
+                               "таймаут, молчание с датой. «Не получилось» — не "
+                               "результат"),
+    "dead_end": ("--dead-end", "что должно измениться СНАРУЖИ, чтобы сдвинулось: "
+                               "чей доступ, чьё решение, чей ответ, какой факт. "
+                               "Если ответ «мне надо ещё поразбираться» — снаружи "
+                               "менять нечего, это escalation=ours: не заполняй "
+                               "это поле вовсе, и команда так и запишет"),
+    "self_attempt": ("--self-attempt", "что искал, что прочитал, что попробовал и "
+                                       "почему не закрылось"),
+}
+
+
+def gate_attempt(values: dict) -> None:
+    """Отказать, если предъявленная попытка не называет ни одного предмета.
+
+    Незаполненное поле попытки записи НЕ отвергает — блокировка настоящая, её
+    надо зафиксировать, и понижение до `ours` объявляется вслух. А вот
+    заполненное отглагольным существительным отвергается: пустое поле честно,
+    имитация — нет, и разница между ними в том, что первое видно, а второе
+    выглядит как работа.
+    """
+    bad = [(ATTEMPT_GATE[field][0], ATTEMPT_GATE[field][1], values[field])
+           for field in ATTEMPT_GATE
+           if values.get(field) is not None and is_vague(values[field])]
+    if not bad:
+        return
+    lines = ["предъявленная попытка не называет ни одного предмета:"]
+    for flag, why, value in bad:
+        lines.append(f"    {flag} «{str(value).strip()[:60]}»")
+        lines.append(f"        {why}")
+    lines.append("")
+    lines.append("Пустое поле честнее такого: незаполненную попытку команда")
+    lines.append("запишет как escalation=ours и скажет об этом вслух, а")
+    lines.append("«разбирался» неотличимо от работы, которой не было.")
+    raise MnemoError("\n".join(lines))
+
+
+PASS_OUTCOMES = ("refuted", "confirmed", "insufficient")
+
+
+def apply_pass_outcome(record: dict, outcome: str, fresh: str | None) -> list[str]:
+    """Исход прохода самоопровержения — решает команда, а не модель.
+
+    Проход существует, чтобы ОПРОВЕРГНУТЬ собственный вердикт: снятый блокер —
+    выигранный день, а не признание ошибки. Но «перепроверил, всё так же» — это
+    ровно то, что модель напишет, ничего не перепроверив, и отличить одно от
+    другого чтением текста нельзя.
+
+    Отличить можно сравнением: `confirmed` обязан пополнить `returned` второй
+    уликой. Сравнение возможно там, где виден и старый текст, и новый, — то
+    есть здесь, в режиме `--id`, а не в рассуждении модели о самой себе.
+    Не пополнилось — исход не `confirmed`, а `insufficient`, и это не мнение.
+
+    Защита неполная: она ловит «не изменилось» и не ловит «переформулировано
+    теми же словами иначе». Изображать герметичность нельзя. Расчёт на другое —
+    честный исход «новой попытки не нашёл» стоит одной строки, а правдоподобно
+    отличающийся текст надо сочинять.
+    """
+    old = str(record.get("returned") or "").strip()
+    fresh = str(fresh or "").strip()
+    said = []
+
+    if outcome == "confirmed":
+        added = bool(fresh) and normalize_text(fresh) != normalize_text(old) \
+            and normalize_text(fresh) not in normalize_text(old)
+        if not added:
+            outcome = "insufficient"
+            # Текст, который не пополнил returned, не дописываем и в пометку:
+            # иначе та же улика оказалась бы в поле дважды и выглядела бы как
+            # две.
+            fresh = ""
+            said.append("проход объявлен confirmed, но returned не пополнилось — "
+                        "подтверждение без новой улики не принимается, исход "
+                        "переклассифицирован в insufficient")
+        else:
+            record["returned"] = f"{old}; {fresh}" if old else fresh
+            said.append("confirmed: блокер усилен второй уликой, "
+                        "escalation остаётся theirs")
+
+    if outcome == "refuted":
+        if not fresh:
+            raise MnemoError(
+                "--pass-outcome refuted требует --returned с описанием найденного "
+                "обхода: снятый блокер — результат прохода, и он записывается"
+            )
+        record["returned"] = f"{old}; обход: {fresh}" if old else f"обход: {fresh}"
+        record["dead_end"] = None
+        said.append("refuted: найден путь — снаружи менять нечего, escalation=ours. "
+                    "Это успех прохода, а не ошибка первого вывода")
+    elif outcome == "insufficient":
+        mark = "новая попытка не найдена"
+        if fresh:
+            mark = f"{mark}: {fresh}"
+        record["returned"] = f"{old}; {mark}" if old else mark
+        record["dead_end"] = None
+        said.append("insufficient: новой попытки нет, значит это не блокер — "
+                    "escalation=ours. Честный исход, не провал")
+    return said
+
+
+def announce_escalation(record: dict) -> None:
+    """Сказать вслух, на чьей стороне следующий шаг, и почему.
+
+    Молчаливое понижение — тот же дефект, что молчаливое удаление вопроса:
+    запись выглядит заведённой как надо, а классификация у неё другая, и
+    узнаётся это в момент, когда на неё уже сослались.
+    """
+    where = escalation(record)
+    if where is None:
+        return
+    if where == "theirs":
+        print(f"  блокировка: escalation=theirs — следующий шаг чужой, "
+              f"попытка предъявлена ({record['dead_end']})")
+        return
+    absent = ", ".join(ATTEMPT_GATE[f][0] for f in missing_attempt(record))
+    print(f"  блокировка: завёл как ours (следующий шаг наш), "
+          f"потому что не заполнено {absent}")
+    print("  наверх такое не уходит: чужого действия оно не требует. "
+          "Предъяви попытку — и станет theirs")
 
 
 def report_similar_batch(fresh, records, field, anyway, kind):
@@ -825,6 +1038,12 @@ def cmd_req(args) -> int:
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
 
+    # Заслон на содержимое попытки — до всего остального: он смотрит на то, что
+    # передал человек, а не на то, что уже лежит в манифесте. Так правило
+    # остаётся требованием К ЗАПИСИ, и старые записи от него не страдают.
+    gate_attempt({"tried": args.tried, "returned": args.returned,
+                  "dead_end": args.dead_end})
+
     if getattr(args, "batch", None):
         if args.id:
             raise MnemoError("--batch и --id несовместимы: пакет заводит новые записи")
@@ -854,10 +1073,12 @@ def cmd_req(args) -> int:
                 based_on=refs or [b.strip() for b in (args.based_on or "").split(",") if b.strip()],
                 state=args.state or "stated", evidence=args.evidence,
                 blocking=args.blocking, blocking_since=args.blocking_since,
+                tried=args.tried, returned=args.returned, dead_end=args.dead_end,
                 stage=args.stage, note=args.note, date=args.date,
             )
             manifest["requirements"].append(record)
             print(f"{record['id']}  {record['state']}  {record['quote'][:56]}")
+            announce_escalation(record)
         save_manifest(export, manifest)
         return 0
 
@@ -875,16 +1096,27 @@ def cmd_req(args) -> int:
                 f"{record['id']}: снятие требования требует --note с причиной — "
                 "почему оно больше не действует"
             )
-        for field in ("quote", "wanted_by", "state", "evidence", "blocking",
-                      "blocking_since", "stage", "supersedes", "note", "date"):
+        fields = ["quote", "wanted_by", "state", "evidence", "blocking",
+                  "blocking_since", "tried", "returned", "dead_end",
+                  "stage", "supersedes", "note", "date"]
+        if args.pass_outcome:
+            # При проходе `--returned` — это НОВАЯ улика, а не замена старой:
+            # сравнивать её команде не с чем, если старую уже затёрли.
+            fields.remove("returned")
+        for field in fields:
             value = getattr(args, field, None)
             if value is not None:
                 record[field] = value
         if args.based_on:
             record["based_on"] = [b.strip() for b in args.based_on.split(",") if b.strip()]
+        said = apply_pass_outcome(record, args.pass_outcome, args.returned) \
+            if args.pass_outcome else []
         new_requirement(**record)  # перепроверка контракта после правки
         save_manifest(export, manifest)
         print(f"{record['id']}  {record['state']}  {record['quote'][:56]}")
+        for line in said:
+            print(f"  {line}")
+        announce_escalation(record)
         return 0
 
     if not args.quote:
@@ -899,11 +1131,13 @@ def cmd_req(args) -> int:
         wanted_by=args.wanted_by, based_on=[b.strip() for b in (args.based_on or "").split(",") if b.strip()],
         state=args.state or "stated", evidence=args.evidence, blocking=args.blocking,
         blocking_since=args.blocking_since,
+        tried=args.tried, returned=args.returned, dead_end=args.dead_end,
         stage=args.stage, supersedes=args.supersedes, note=args.note, date=args.date,
     )
     manifest["requirements"].append(record)
     save_manifest(export, manifest)
     print(f"{record['id']}  {record['state']}  {record['quote'][:56]}")
+    announce_escalation(record)
     return 0
 
 
@@ -911,6 +1145,9 @@ def cmd_ask(args) -> int:
     """Открытый вопрос. Состояние выводится из содержимого, не хранится."""
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
+
+    gate_attempt({"tried": args.tried, "returned": args.returned,
+                  "dead_end": args.dead_end, "self_attempt": args.self_attempt})
 
     if getattr(args, "batch", None):
         if args.id:
@@ -923,13 +1160,20 @@ def cmd_ask(args) -> int:
             # заданными — и следующая сводка молча перестала бы их поднимать.
             raise MnemoError("отметки --raised-to / --answered-by / --dropped-reason "
                              "к пакету не применяются: они про конкретный вопрос")
+        if args.assumed or args.cost_if_wrong or args.pass_outcome:
+            # Допущение замещает КОНКРЕТНЫЙ вопрос: одно на пакет означало бы,
+            # что двадцать разных вопросов закрыты одной догадкой с одной ценой
+            # промаха — неправда в девятнадцати случаях из двадцати.
+            raise MnemoError("--assumed / --cost-if-wrong / --pass-outcome к пакету "
+                             "не применяются: допущение и проход — про конкретную запись")
         entries = read_batch(Path(args.batch).expanduser())
         # Заслон действует и на пакет: двадцать вопросов без impact — это
         # двадцать раз тот же мусор, а не исключение из правила. `based_on`
         # берётся из хвоста строки после `::` либо из общего флага.
         for text, refs in entries:
             gate_question({"impact": args.impact, "asked_of": args.asked_of,
-                           "based_on": refs or args.based_on})
+                           "based_on": refs or args.based_on,
+                           "self_attempt": args.self_attempt})
         fresh, _ = batch_plan(entries, [q["text"] for q in manifest["questions"]], "вопрос")
         report_similar_batch(fresh, manifest["questions"], "text", args.anyway, "вопрос")
         if not args.apply:
@@ -942,12 +1186,15 @@ def cmd_ask(args) -> int:
             record = new_question(
                 id=next_id(manifest, "question"), text=text, impact=args.impact,
                 blocking=args.blocking, blocking_since=args.blocking_since,
+                self_attempt=args.self_attempt, tried=args.tried,
+                returned=args.returned, dead_end=args.dead_end,
                 asked_of=args.asked_of,
                 based_on=refs or [b.strip() for b in (args.based_on or "").split(",") if b.strip()],
                 date=args.date,
             )
             manifest["questions"].append(record)
             print(f"{record['id']}  {question_state(record)}  {record['text'][:56]}")
+            announce_escalation(record)
         save_manifest(export, manifest)
         return 0
 
@@ -962,32 +1209,49 @@ def cmd_ask(args) -> int:
                 "to": args.raised_to, "at": args.raised_at or today(),
                 "where": args.where or "",
             })
-        for field in ("text", "impact", "blocking", "blocking_since", "asked_of",
-                      "answered_by", "dropped_reason", "date"):
+        fields = ["text", "impact", "blocking", "blocking_since", "asked_of",
+                  "self_attempt", "tried", "returned", "dead_end",
+                  "assumed", "cost_if_wrong", "answered_by", "dropped_reason", "date"]
+        if args.pass_outcome:
+            fields.remove("returned")
+        for field in fields:
             value = getattr(args, field, None)
             if value is not None:
                 record[field] = value
         if args.based_on:
             record["based_on"] = [b.strip() for b in args.based_on.split(",") if b.strip()]
+        said = apply_pass_outcome(record, args.pass_outcome, args.returned) \
+            if args.pass_outcome else []
         new_question(**record)  # перепроверка контракта после правки
         save_manifest(export, manifest)
         print(f"{record['id']}  {question_state(record)}  {record['text'][:56]}")
+        for line in said:
+            print(f"  {line}")
+        if question_state(record) == "assumed":
+            print(f"  понижено до допущения, а не снято: «{record['assumed']}»")
+            print(f"  цена промаха: {record['cost_if_wrong']}")
+            print("  из списка открытых уходит, в полной сводке остаётся видимым; "
+                  "придёт настоящий ответ — --answered-by перекроет допущение")
+        announce_escalation(record)
         return 0
 
     if not args.text:
         raise MnemoError("--text обязателен")
     gate_question({"impact": args.impact, "asked_of": args.asked_of,
-                   "based_on": args.based_on})
+                   "based_on": args.based_on, "self_attempt": args.self_attempt})
     refuse_if_similar(args.text, manifest["questions"], "text", args.anyway, "вопрос")
     record = new_question(
         id=next_id(manifest, "question"), text=args.text, impact=args.impact,
         blocking=args.blocking, blocking_since=args.blocking_since, asked_of=args.asked_of,
+        self_attempt=args.self_attempt, tried=args.tried, returned=args.returned,
+        dead_end=args.dead_end, assumed=args.assumed, cost_if_wrong=args.cost_if_wrong,
         based_on=[b.strip() for b in (args.based_on or "").split(",") if b.strip()],
         date=args.date,
     )
     manifest["questions"].append(record)
     save_manifest(export, manifest)
     print(f"{record['id']}  {question_state(record)}  {record['text'][:56]}")
+    announce_escalation(record)
     return 0
 
 
@@ -1277,6 +1541,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_req.add_argument("--blocking-since", dest="blocking_since", default=None,
                         help="с какого числа блокирует; по умолчанию дата записи")
     p_req.add_argument("--blocking", default=None, help="что стоит без этого")
+    add_attempt_args(p_req)
     p_req.add_argument("--stage", default=None, help="к какому этапу относится")
     p_req.add_argument("--supersedes", default=None, help="какое требование отменяет")
     p_req.add_argument("--note", default=None, help="расхождения, оговорки")
@@ -1297,6 +1562,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--blocking-since", dest="blocking_since", default=None,
                         help="с какого числа блокирует; по умолчанию дата записи")
     p_ask.add_argument("--blocking", default=None, help="что стоит без ответа")
+    add_attempt_args(p_ask)
+    p_ask.add_argument("--self-attempt", dest="self_attempt", default=None,
+                       help="что сам сделал, чтобы закрыть вопрос: что искал, что "
+                            "прочитал, что попробовал и почему не закрылось")
+    p_ask.add_argument("--assumed", default=None,
+                       help="понизить до допущения: что мы приняли за верное, "
+                            "утвердительно. Это НЕ снятие — вопрос остаётся видимым")
+    p_ask.add_argument("--cost-if-wrong", dest="cost_if_wrong", default=None,
+                       help="что придётся переделать, если допущение неверно; "
+                            "обязателен при --assumed")
     p_ask.add_argument("--asked-of", dest="asked_of", default=None)
     p_ask.add_argument("--based-on", dest="based_on", default="", help="ссылки через запятую")
     p_ask.add_argument("--raised-to", dest="raised_to", default=None, help="отметить, что спросили у ...")

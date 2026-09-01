@@ -35,20 +35,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
     SPEC_VERSION, STALE_AFTER_DAYS, MnemoError, blocked_since, days_blocked,
-    find_export, load_manifest, question_state, resolve_person, stale_reason,
-    superseded_ids,
+    escalation, find_export, load_manifest, missing_attempt, question_state,
+    resolve_person, stale_reason, superseded_ids,
 )
 
 # Версия контракта чтения — своя, не версия стандарта: формат вывода может
 # устояться раньше, чем формат манифеста, и наоборот. Нормативное описание —
 # SPEC/QUERY.md, правила совместимости — STANDARD.md §14.
-QUERY_CONTRACT = "2"
+QUERY_CONTRACT = "3"
 
 STATE_MARK = {
     "verified": "✅", "done": "☑️", "accepted": "⏳",
     "stated": "❓", "dropped": "✖️",
 }
-Q_MARK = {"open": "❓", "raised": "📨", "answered": "✅", "dropped": "✖️"}
+Q_MARK = {"open": "❓", "raised": "📨", "answered": "✅", "dropped": "✖️",
+          "assumed": "🤔"}
 
 
 MASK = "‹изъято›"
@@ -84,9 +85,12 @@ def who(manifest: dict, ident: str | None) -> str:
 
 REQ_DEFAULTS = {"quote": "<без формулировки>", "state": "stated", "date": "1970-01-01",
                 "based_on": [], "blocking": None, "evidence": None, "stage": None,
-                "note": None, "wanted_by": None, "supersedes": None, "id": "?"}
+                "note": None, "wanted_by": None, "supersedes": None, "id": "?",
+                "tried": None, "returned": None, "dead_end": None}
 Q_DEFAULTS = {"text": "<без текста>", "date": "1970-01-01", "raised": [], "blocking": None,
-              "impact": None, "answered_by": None, "asked_of": None, "id": "?"}
+              "impact": None, "answered_by": None, "asked_of": None, "id": "?",
+              "self_attempt": None, "tried": None, "returned": None, "dead_end": None,
+              "assumed": None, "cost_if_wrong": None}
 
 
 def derived(record: dict, kind: str) -> dict:
@@ -98,6 +102,10 @@ def derived(record: dict, kind: str) -> dict:
     расходятся — поэтому вывод отдаётся готовым.
     """
     return {"blocked_since": blocked_since(record), "days_blocked": days_blocked(record),
+            # На чьей стороне следующий шаг. Отдаётся готовым по той же причине,
+            # что и остальное выведенное: иначе потребитель напишет вывод сам,
+            # и два места разойдутся молча.
+            "escalation": escalation(record),
             "stale_reason": stale_reason(record, kind)}
 
 
@@ -165,7 +173,8 @@ def collect(manifest: dict) -> dict:
     def q_key(q):
         return (0 if q.get("blocking") else 1,
                 -(days_blocked(q) or 0),
-                {"open": 0, "raised": 1, "answered": 2, "dropped": 3}[q["state"]],
+                {"open": 0, "raised": 1, "assumed": 2, "answered": 3,
+                 "dropped": 4}[q["state"]],
                 q["date"])
 
     return {"requirements": sorted(reqs, key=req_key),
@@ -180,6 +189,9 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
     claimed = [r for r in live if r["state"] == "done"]
     pending = [r for r in live if r["state"] in ("stated", "accepted")]
     open_q = [q for q in questions if q["state"] in ("open", "raised")]
+    # Допущение — не открытый вопрос: мы уже ответили себе сами, и держать его в
+    # списке открытых значило бы отменить понижение.
+    assumptions = [q for q in questions if q["state"] == "assumed"]
     # Протухшее — отдельно от открытого. Список открытых создаёт видимость
     # работы, пока в нём вперемешку лежат вчерашние и те, что спросили две
     # недели назад и не дождались ответа. Вторые требуют действия другого рода:
@@ -196,40 +208,71 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
                f"принято заказчиком {len(confirmed)}, "
                f"сделано и ждёт приёмки {len(claimed)}, "
                f"в работе {len(pending)}")
-    out.append(f"Вопросов открытых: {len(open_q)} из {len(questions)}")
+    out.append(f"Вопросов открытых: {len(open_q)} из {len(questions)}"
+               + (f", понижено до допущений {len(assumptions)}" if assumptions else ""))
     superseded = [r for r in reqs if r["superseded"]]
     if superseded:
         out.append(f"Отменено более поздними: {len(superseded)} — "
                    "проверь, что зависевшее от них пересмотрено")
     out.append("")
 
-    blocking_r = [r for r in pending if r.get("blocking")]
-    blocking_q = [q for q in open_q if q.get("blocking")]
-    if blocking_r or blocking_q:
-        out += ["━━━ БЕЗ ЭТОГО РАБОТА СТОИТ ━━━", ""]
-        for r in blocking_r:
-            age = days_blocked(r)
+    def block_lines(records: list[dict]) -> list[str]:
+        rows = []
+        for record in records:
+            is_req = str(record["id"]).startswith("t")
+            age = days_blocked(record)
             tail = f"  ({age} дн.)" if age is not None and age > 0 else ""
-            out.append(f"  {r['id']}  «{cut(visible(r, 'quote'), 70)}»{tail}")
-            out.append(f"       стоит: {r['blocking']}")
-            out.append(f"       хочет: {who(manifest, r.get('wanted_by'))}"
-                       + (f" · {', '.join(r['based_on'])}" if r.get("based_on") else ""))
-        for q in blocking_q:
-            mark = "уже спрашивали" if q["raised"] else "НЕ СПРАШИВАЛИ"
-            age = days_blocked(q)
-            tail = f"  ({age} дн.)" if age is not None and age > 0 else ""
-            out.append(f"  {q['id']}  {cut(visible(q, 'text'), 70)}{tail}")
-            out.append(f"       стоит: {q['blocking']}   [{mark}]")
-            if not q["raised"] and q.get("asked_of"):
-                # «Не спрашивали» без указания, у кого спрашивать, — половина
-                # ответа. Именно эта строка объявлена самой ценной в выводе.
-                out.append(f"       спросить у: {who(manifest, q['asked_of'])}")
-            if q.get("impact"):
-                out.append(f"       от ответа зависит: {cut(q['impact'], 70)}")
-            for raised in q["raised"]:
-                out.append(f"       спрошено {raised['at']} у {who(manifest, raised['to'])}"
-                           + (f" ({raised['where']})" if raised.get("where") else ""))
+            if is_req:
+                rows.append(f"  {record['id']}  «{cut(visible(record, 'quote'), 70)}»{tail}")
+                rows.append(f"       стоит: {record['blocking']}")
+                rows.append(f"       хочет: {who(manifest, record.get('wanted_by'))}"
+                            + (f" · {', '.join(record['based_on'])}"
+                               if record.get("based_on") else ""))
+            else:
+                mark = "уже спрашивали" if record["raised"] else "НЕ СПРАШИВАЛИ"
+                rows.append(f"  {record['id']}  {cut(visible(record, 'text'), 70)}{tail}")
+                rows.append(f"       стоит: {record['blocking']}   [{mark}]")
+                if not record["raised"] and record.get("asked_of"):
+                    # «Не спрашивали» без указания, у кого спрашивать, — половина
+                    # ответа. Именно эта строка объявлена самой ценной в выводе.
+                    rows.append(f"       спросить у: {who(manifest, record['asked_of'])}")
+                if record.get("impact"):
+                    rows.append(f"       от ответа зависит: {cut(record['impact'], 70)}")
+                for raised in record["raised"]:
+                    rows.append(f"       спрошено {raised['at']} у {who(manifest, raised['to'])}"
+                                + (f" ({raised['where']})" if raised.get("where") else ""))
+            if record.get("tried"):
+                rows.append(f"       пробовали: {cut(record['tried'], 70)}")
+            if record.get("returned"):
+                rows.append(f"       вернулось: {cut(record['returned'], 70)}")
+            if record.get("dead_end"):
+                rows.append(f"       нужно снаружи: {cut(record['dead_end'], 70)}")
+            elif not record.get("tried") and not record.get("returned"):
+                # Вторая пометка того же рода, что [НЕ СПРАШИВАЛИ]. Все блокеры,
+                # заведённые до 1.16, попадут сюда: попытку у них никто не
+                # спрашивал, и это верно по существу — но обязано быть сказано,
+                # а не случиться молча.
+                rows.append("       [ПОПЫТКА НЕ ПРЕДЪЯВЛЕНА] — переклассифицировано "
+                            "в ours; предъяви --tried / --returned / --dead-end")
+        return rows
+
+    blocking = [r for r in pending if r.get("blocking")] + \
+               [q for q in open_q if q.get("blocking")]
+    theirs = [b for b in blocking if b.get("escalation") == "theirs"]
+    ours = [b for b in blocking if b.get("escalation") != "theirs"]
+    if theirs:
+        # Сверху — только чужое: это то, что уходит наверх и требует чужого
+        # действия. Своё стоит ниже, потому что по нему следующий шаг наш и
+        # никого ждать не надо.
+        out += ["━━━ ЖДЁМ ЧУЖОГО ШАГА (escalation=theirs) ━━━", ""]
+        out += block_lines(theirs)
         out.append("")
+    if ours:
+        out += ["━━━ РАБОТА СТОИТ, НО СЛЕДУЮЩИЙ ШАГ НАШ (escalation=ours) ━━━", ""]
+        out += block_lines(ours)
+        out.append("")
+    blocking_r = [r for r in blocking if str(r["id"]).startswith("t")]
+    blocking_q = [q for q in blocking if not str(q["id"]).startswith("t")]
 
     rest_q = [q for q in open_q if not q.get("blocking")]
     if rest_q:
@@ -240,6 +283,18 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
                 last = q["raised"][-1]
                 tail = f"  ← спрошено {last['at']} у {who(manifest, last['to'])}"
             out.append(f"  {Q_MARK[q['state']]} {q['id']}  {cut(visible(q, 'text'), 66)}{tail}")
+        out.append("")
+
+    if assumptions and not open_only:
+        # Понижение — не удаление. Из списка открытых допущение уходит (иначе
+        # заслон отработал бы вхолостую: те же семь пунктов, только под другим
+        # заголовком), но исчезнуть совсем оно не вправе — это было бы то самое
+        # молчаливое удаление вопроса, которое понижение и заменяет.
+        out += ["━━━ ДОПУЩЕНИЯ (не спросили, ответили себе сами) ━━━", ""]
+        for q in assumptions:
+            out.append(f"  🤔 {q['id']}  {cut(visible(q, 'text'), 66)}")
+            out.append(f"       приняли: {cut(q['assumed'], 70)}")
+            out.append(f"       если неверно: {cut(q.get('cost_if_wrong') or '—', 70)}")
         out.append("")
 
     if stale:
@@ -283,7 +338,9 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
             parts.append(f"{len(claimed)} сделано, но не проверено")
         out.append("Нет, не всё: " + ", ".join(parts) + ".")
         if blocking_r or blocking_q:
-            out.append(f"Из них блокирует работу: {len(blocking_r) + len(blocking_q)}.")
+            out.append(f"Из них блокирует работу: {len(blocking_r) + len(blocking_q)}"
+                       + (f" — ждёт чужого шага {len(theirs)}, "
+                          f"следующий шаг наш у {len(ours)}." if ours else "."))
     else:
         out.append(f"Да: все {len(confirmed)} требований подтверждены доказательством.")
     if open_q:

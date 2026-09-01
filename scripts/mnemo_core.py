@@ -24,7 +24,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.15"
+SPEC_VERSION = "1.16"
 SPEC_MAJOR = 1
 
 # Предел на слаг в имени файла. Имя складывается из даты, слага и имени
@@ -360,7 +360,25 @@ SECTION_SINCE = (
     ("requirements", "1.7"),
     ("questions", "1.7"),
 )
-ITEM_FIELD_SINCE = (("attribution", "1.1"),)
+
+# Поле записи → версия стандарта, в которой оно появилось. Карта по РОДАМ, а не
+# только по материалам: раньше здесь стоял один кортеж `ITEM_FIELD_SINCE`, и
+# `required_spec` смотрел исключительно в `items`. Поля, добавленные требованию
+# или вопросу, в неё не попадали ни одним способом — сами разделы числятся с
+# 1.7 и версию выше не поднимают, — поэтому экспорт, записанный новым
+# инструментом, нёс поля 1.16 и продолжал объявлять 1.15. §14 нарушался молча:
+# и авто-подъём в `save_manifest`, и правило `V18` спрашивают именно эту карту,
+# так что дыра в ней выключает оба механизма разом.
+FIELD_SINCE = {
+    "items": (("attribution", "1.1"),),
+    "requirements": (
+        ("tried", "1.16"), ("returned", "1.16"), ("dead_end", "1.16"),
+    ),
+    "questions": (
+        ("self_attempt", "1.16"), ("tried", "1.16"), ("returned", "1.16"),
+        ("dead_end", "1.16"), ("assumed", "1.16"), ("cost_if_wrong", "1.16"),
+    ),
+}
 
 
 def _ver(value: str) -> tuple[int, ...]:
@@ -381,9 +399,11 @@ def required_spec(manifest: dict) -> str:
     for section, since in SECTION_SINCE:
         if manifest.get(section):
             need = max(need, _ver(since))
-    for field, since in ITEM_FIELD_SINCE:
-        if any(field in item for item in manifest.get("items", [])):
-            need = max(need, _ver(since))
+    for bucket, fields in FIELD_SINCE.items():
+        records = manifest.get(bucket) or []
+        for field, since in fields:
+            if any(field in record for record in records):
+                need = max(need, _ver(since))
     return ".".join(str(x) for x in need)
 
 
@@ -569,6 +589,11 @@ def new_requirement(**kwargs: Any) -> dict:
         "evidence": kwargs.get("evidence"),
         "blocking": kwargs.get("blocking"),
         "blocking_since": kwargs.get("blocking_since"),
+        # Поля попытки (§Блокировка). Хранимой классификации нет: на чьей
+        # стороне следующий шаг, выводит escalation() из этих трёх.
+        "tried": kwargs.get("tried"),
+        "returned": kwargs.get("returned"),
+        "dead_end": kwargs.get("dead_end"),
         "stage": kwargs.get("stage"),
         "supersedes": kwargs.get("supersedes"),
         "note": kwargs.get("note"),
@@ -608,6 +633,17 @@ def new_question(**kwargs: Any) -> dict:
         "impact": kwargs.get("impact"),
         "blocking": kwargs.get("blocking"),
         "blocking_since": kwargs.get("blocking_since"),
+        # Попытка закрыть вопрос своими силами. Отличается от полей блокировки
+        # адресатом: self_attempt про вопрос целиком, tried/returned/dead_end —
+        # про то, чем упёрлась работа.
+        "self_attempt": kwargs.get("self_attempt"),
+        "tried": kwargs.get("tried"),
+        "returned": kwargs.get("returned"),
+        "dead_end": kwargs.get("dead_end"),
+        # Понижение до допущения: вопрос не задаём, отвечаем себе сами и
+        # называем цену промаха. Это НЕ снятие — dropped_reason не трогается.
+        "assumed": kwargs.get("assumed"),
+        "cost_if_wrong": kwargs.get("cost_if_wrong"),
         "asked_of": kwargs.get("asked_of"),
         "based_on": _dedupe(kwargs.get("based_on")),
         "raised": list(kwargs.get("raised") or []),
@@ -618,6 +654,15 @@ def new_question(**kwargs: Any) -> dict:
     }
     if not str(record["text"]).strip():
         raise MnemoError("text обязателен")
+    # Допущение без цены ошибки — это «я решил, и ладно»: понижение перестаёт
+    # быть решением с последствиями и становится способом убрать вопрос из
+    # списка. Отказ жёсткий, по прецеденту evidence при done (§6б).
+    if str(record["assumed"] or "").strip() and not str(record["cost_if_wrong"] or "").strip():
+        raise MnemoError(
+            f"{record['id']}: --assumed требует --cost-if-wrong — что придётся "
+            "переделать, если допущение неверно. Допущение без цены промаха "
+            "неотличимо от молчаливого удаления вопроса"
+        )
     if record.get("blocking_since"):
         parse_day(record["blocking_since"])
     for mark in record["raised"]:
@@ -663,6 +708,12 @@ def stale_reason(record: dict, kind: str, after: int = STALE_AFTER_DAYS) -> str 
     """
     if kind == "question":
         if record.get("answered_by") or record.get("dropped_reason"):
+            return None
+        if str(record.get("assumed") or "").strip():
+            # Понижённый до допущения вопрос никого не ждёт: мы ответили себе
+            # сами. Оставь его протухать — и он вернётся в работу через секцию
+            # «ПРОТУХЛО», то есть понижение отменится тем же способом, каким
+            # его запретили отменять через список открытых.
             return None
         asked = last_raised(record)
         if asked:
@@ -733,14 +784,54 @@ def similar_records(text: str, records: list[dict], field: str,
 
 
 def question_state(record: dict) -> str:
-    """Состояние вопроса, выведенное из содержимого."""
+    """Состояние вопроса, выведенное из содержимого.
+
+    Порядок: `dropped` → `answered` → `assumed` → `raised` → `open`.
+
+    `assumed` стоит ПОСЛЕ `answered` намеренно. Поставь его раньше — и пришедший
+    настоящий ответ всё равно читался бы как допущение, то есть опровержение
+    догадки стало бы невидимым; ровно от этого понижение и защищает. А заодно
+    «отвеченное при непустом assumed» — это и есть проверенное допущение, и
+    отдельной хранимой метки «допущение проверено» не нужно.
+    """
     if record.get("dropped_reason"):
         return "dropped"
     if record.get("answered_by"):
         return "answered"
+    if str(record.get("assumed") or "").strip():
+        return "assumed"
     if record.get("raised"):
         return "raised"
     return "open"
+
+
+# Поля попытки, которые обязана предъявить блокировка, прежде чем считаться
+# чужой. Порядок — тот, в котором их заполняют.
+ATTEMPT_FIELDS = ("tried", "returned", "dead_end")
+
+
+def missing_attempt(record: dict) -> list[str]:
+    """Какие поля попытки не заполнены. Пустой список — предъявлена целиком."""
+    return [f for f in ATTEMPT_FIELDS if not str(record.get(f) or "").strip()]
+
+
+def escalation(record: dict) -> str | None:
+    """На чьей стороне следующий шаг: `theirs`, `ours` или `None`.
+
+    Шестая строка таблицы §Блокировка — **выводимое** поле, а не хранимый
+    статус. Хранимы только сами поля попытки; классификация считается из них,
+    поэтому разойтись с содержимым не может.
+
+    Имя выбрано так, чтобы его нельзя было спутать с хранимым `blocking`.
+    Вариант `blocked` отвергнут: пара `blocking`/`blocked` отличается двумя
+    буквами и воспроизводит аварию, уже случившуюся на паре
+    `blocking_since`/`blocked_since`, — потребитель прочитал хранимое, получил
+    «блокеров нет» и молча потерял все. `ours`/`theirs` вдобавок несёт само
+    правило: у «ours» следующий шаг твой, у «theirs» чужой.
+    """
+    if not str(record.get("blocking") or "").strip():
+        return None
+    return "ours" if missing_attempt(record) else "theirs"
 
 
 def blocked_since(record: dict) -> str | None:
