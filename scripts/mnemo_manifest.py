@@ -854,13 +854,38 @@ def apply_pass_outcome(record: dict, outcome: str, fresh: str | None) -> list[st
     теми же словами иначе». Изображать герметичность нельзя. Расчёт на другое —
     честный исход «новой попытки не нашёл» стоит одной строки, а правдоподобно
     отличающийся текст надо сочинять.
+
+    Про классификацию тут не говорится ни слова: на чьей стороне следующий шаг,
+    печатает `announce_escalation` — из настоящего значения `escalation()` после
+    правки. Дублировать вывод сюда нельзя: зашитая строка «остаётся theirs»
+    расходилась с соседней строкой того же вывода, когда попытка была неполной.
     """
     old = str(record.get("returned") or "").strip()
     fresh = str(fresh or "").strip()
     said = []
 
+    # Проверки — до единой правки записи: отказ обязан ничего не менять.
+    if not str(record.get("blocking") or "").strip():
+        raise MnemoError(
+            "--pass-outcome применяется к блокирующей записи: проход существует, "
+            "чтобы попытаться снять блокер, а у этой записи blocking пуст — "
+            "снимать нечего. Если работа правда стоит, сперва заполни --blocking"
+        )
+    if outcome == "confirmed" and not old:
+        # `confirmed` — это «вернулось то же, что и в прошлый раз». Прошлого раза
+        # в записи нет, сравнивать не с чем, и принятая тут улика была бы первой,
+        # а не второй. Дешёвый обход механической проверки: она вырождалась в
+        # «строка непустая» и пропускала переезд ours → theirs без единого
+        # сравнения.
+        raise MnemoError(
+            "confirmed подтверждает уже записанное, а первой улики у записи нет: "
+            "returned пуст, сравнивать не с чем. Запиши, что вернулось в первый "
+            "раз (--returned без --pass-outcome), либо оформи исход как "
+            "insufficient — новой попытки не нашлось"
+        )
+
     if outcome == "confirmed":
-        added = bool(fresh) and normalize_text(fresh) != normalize_text(old) \
+        added = normalize_text(fresh) != normalize_text(old) \
             and normalize_text(fresh) not in normalize_text(old)
         if not added:
             outcome = "insufficient"
@@ -873,8 +898,7 @@ def apply_pass_outcome(record: dict, outcome: str, fresh: str | None) -> list[st
                         "переклассифицирован в insufficient")
         else:
             record["returned"] = f"{old}; {fresh}" if old else fresh
-            said.append("confirmed: блокер усилен второй уликой, "
-                        "escalation остаётся theirs")
+            said.append("confirmed: блокер усилен второй уликой")
 
     if outcome == "refuted":
         if not fresh:
@@ -884,7 +908,7 @@ def apply_pass_outcome(record: dict, outcome: str, fresh: str | None) -> list[st
             )
         record["returned"] = f"{old}; обход: {fresh}" if old else f"обход: {fresh}"
         record["dead_end"] = None
-        said.append("refuted: найден путь — снаружи менять нечего, escalation=ours. "
+        said.append("refuted: найден путь — снаружи менять нечего, dead_end снят. "
                     "Это успех прохода, а не ошибка первого вывода")
     elif outcome == "insufficient":
         mark = "новая попытка не найдена"
@@ -893,7 +917,7 @@ def apply_pass_outcome(record: dict, outcome: str, fresh: str | None) -> list[st
         record["returned"] = f"{old}; {mark}" if old else mark
         record["dead_end"] = None
         said.append("insufficient: новой попытки нет, значит это не блокер — "
-                    "escalation=ours. Честный исход, не провал")
+                    "dead_end снят. Честный исход, не провал")
     return said
 
 

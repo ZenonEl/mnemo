@@ -42,11 +42,17 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/mnemo_manifest.py ask --export <dir> \
 
 **Завести пачкой:**
 ```
-... ask --export <dir> --batch voprosy.md --asked-of "<у кого>"          # план
-... ask --export <dir> --batch voprosy.md --asked-of "<у кого>" --apply  # запись
+... ask --export <dir> --batch voprosy.md --impact "<что меняется>" \
+  --asked-of "<у кого>" --based-on "ctx:<slug>#iNNN" \
+  --self-attempt "<чем сам пробовал закрыть>"            # план
+... ask --export <dir> --batch voprosy.md --impact "<что меняется>" \
+  --asked-of "<у кого>" --based-on "ctx:<slug>#iNNN" \
+  --self-attempt "<чем сам пробовал закрыть>" --apply     # запись
 ```
-По вопросу на строку, хвост после `::` — ссылки `based_on`. Отметки
-«спросили» / «отвечено» к пакету не применяются: они про конкретный вопрос.
+Заслон действует и на пакет: двадцать вопросов без `--impact` — это двадцать
+раз тот же мусор, а не исключение из правила. По вопросу на строку, хвост после
+`::` — ссылки `based_on`. Отметки «спросили» / «отвечено», а также `--assumed`
+и `--pass-outcome` к пакету не применяются: они про конкретный вопрос.
 
 **Отметить, что спросили:**
 ```

@@ -343,9 +343,13 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
             parts.append(f"{len(claimed)} сделано, но не проверено")
         out.append("Нет, не всё: " + ", ".join(parts) + ".")
         if blocking_r or blocking_q:
+            # Условие на обе стороны, а не на `ours`: расклад исчезал ровно
+            # тогда, когда он ценнее всего — когда всё стоит на чужой стороне и
+            # отчёт наверх состоит из него целиком.
             out.append(f"Из них блокирует работу: {len(blocking_r) + len(blocking_q)}"
                        + (f" — ждёт чужого шага {len(theirs)}, "
-                          f"следующий шаг наш у {len(ours)}." if ours else "."))
+                          f"следующий шаг наш у {len(ours)}."
+                          if (theirs or ours) else "."))
     else:
         out.append(f"Да: все {len(confirmed)} требований подтверждены доказательством.")
     if open_q:

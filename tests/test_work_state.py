@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -155,6 +156,17 @@ class Escalation(ExportCase):
         row = next(r for r in self.audit_json()["requirements"] if r["id"] == ident)
         self.assertIsNone(row["escalation"])
 
+    def test_the_verdict_names_the_split_even_when_all_of_it_is_theirs(self) -> None:
+        # Расклад исчезал ровно тогда, когда он ценнее всего: когда всё стоит на
+        # чужой стороне и отчёт наверх состоит из него целиком. Условие стояло
+        # на одной стороне вместо обеих.
+        self.a_requirement(blocking="интеграция стоит",
+                           tried="написал в поддержку 20.08",
+                           returned="молчат с 20.08",
+                           dead_end="их админ обязан выдать ключ")
+        out = self.audit().stdout
+        self.assertIn("ждёт чужого шага 1", out)
+
     def test_the_summary_puts_someone_elses_step_above_ours(self) -> None:
         self.a_requirement(quote="нужен доступ к их API", blocking="интеграция стоит")
         self.a_requirement(quote="выгрузка остатков раз в час", blocking="нет ключа",
@@ -214,6 +226,56 @@ class SelfRefutationPass(ExportCase):
         self.assertIsNone(record["dead_end"])
         self.assertIn("публичный фид", record["returned"])
 
+    def test_confirmed_without_a_first_piece_of_evidence_is_refused(self) -> None:
+        """`confirmed` — это «вернулось то же, что и в прошлый раз».
+
+        Прошлого раза в записи нет — сравнивать не с чем, и принятая улика была
+        бы первой, а не второй. Проверка «пополнилось ли returned» при пустом
+        старом вырождалась в «строка непустая» и пропускала переезд
+        `ours → theirs` без единого сравнения: дешёвый обход у механизма,
+        заведённого ради того, чтобы дешёвого пути не было.
+        """
+        ident = self.a_requirement(blocking="приёмка стоит",
+                                   tried="написал их админу 25.08",
+                                   dead_end="их админ обязан выдать доступ")
+        before = self.record(ident)
+        done = self.man("req", "--id", ident, "--pass-outcome", "confirmed",
+                        "--returned", "та же стена")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("первой улики", done.stderr)
+        # Отказ обязан ничего не менять: запись осталась ровно как была.
+        self.assertEqual(self.record(ident), before)
+        row = next(r for r in self.audit_json()["requirements"] if r["id"] == ident)
+        self.assertEqual(row["escalation"], "ours")
+
+    def test_a_pass_on_a_record_that_blocks_nothing_is_refused(self) -> None:
+        # Проход существует, чтобы попытаться снять блокер. Блокера нет —
+        # снимать нечего, а дописанный «обход» засорял бы returned записи,
+        # которая ничего не блокировала, и поднимал ей версию стандарта.
+        ident = self.a_requirement()
+        done = self.man("req", "--id", ident, "--pass-outcome", "confirmed",
+                        "--returned", "та же стена")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("blocking", done.stderr)
+        self.assertIsNone(self.record(ident)["returned"])
+
+    def test_the_pass_never_names_a_side_the_record_does_not_have(self) -> None:
+        # Строка про исход прохода была зашита константой и объявляла theirs,
+        # пока соседняя строка того же вывода объявляла ours. Классификацию
+        # печатает одно место — из настоящего значения после правки.
+        ident = self.a_requirement(blocking="интеграция стоит",
+                                   returned="отказ 401",
+                                   dead_end="их админ обязан выдать ключ")
+        done = self.man("req", "--id", ident, "--pass-outcome", "confirmed",
+                        "--returned", "написал их админу напрямую — тот же отказ 401")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        # --tried не заполнен, значит запись — ours, и ни одна строка вывода не
+        # вправе объявить её чужой. «Предъяви попытку — и станет theirs» в
+        # хвосте подсказки не в счёт: это условие, а не вердикт.
+        self.assertIn("завёл как ours", done.stdout)
+        self.assertNotIn("остаётся theirs", done.stdout)
+        self.assertNotIn("escalation=theirs", done.stdout)
+
     def test_a_pass_on_a_new_record_is_refused_rather_than_ignored(self) -> None:
         # Сравнивать не с чем: старого returned у новой записи нет. Тихо
         # проглотить флаг значит отчитаться о проходе, которого не было.
@@ -260,6 +322,25 @@ class DowngradeToAssumption(ExportCase):
         self.assertIn("ДОПУЩЕНИЯ", out)
         self.assertIn(ident, out)
         self.assertIn("переписать модуль оплаты", out)
+
+    def test_an_assumption_does_not_rot(self) -> None:
+        """Понижённый вопрос никого не ждёт — значит и протухать ему нечем.
+
+        Ветка держалась ни на чём: тестовые вопросы заводятся сегодняшним
+        числом и до порога протухания не доживают, поэтому её отключение
+        оставляло весь набор зелёным. А без неё допущение возвращается в работу
+        через секцию «ПРОТУХЛО» — то есть понижение отменяется тем же способом,
+        каким его запретили отменять через список открытых.
+        """
+        old = (date.today() - timedelta(days=60)).isoformat()
+        ident = self.a_question(date=old)
+        self.assertIn("ПРОТУХЛО", self.audit().stdout)
+
+        self.man("ask", "--id", ident, "--assumed", "как в прошлых проектах",
+                 "--cost-if-wrong", "переписать модуль оплаты, день")
+        out = self.audit().stdout
+        self.assertNotIn("ПРОТУХЛО", out)
+        self.assertIn("ДОПУЩЕНИЯ", out)
 
     def test_the_assumption_is_readable_without_the_tool(self) -> None:
         # §1: экспорт самодостаточен. Состояние `assumed` в INDEX без текста
