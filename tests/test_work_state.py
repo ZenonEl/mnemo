@@ -261,6 +261,20 @@ class DowngradeToAssumption(ExportCase):
         self.assertIn(ident, out)
         self.assertIn("переписать модуль оплаты", out)
 
+    def test_the_assumption_is_readable_without_the_tool(self) -> None:
+        # §1: экспорт самодостаточен. Состояние `assumed` в INDEX без текста
+        # допущения показывало бы, что вопрос не задан, и умалчивало, чем его
+        # заменили и чем мы рискуем.
+        ident = self.a_question()
+        self.man("ask", "--id", ident,
+                 "--assumed", "берём ту же платёжку, что в прошлых проектах",
+                 "--cost-if-wrong", "переписать модуль оплаты и вебхуки, день")
+        _run("mnemo_render.py", "--export", str(self.export))
+        index = (self.export / "INDEX.md").read_text(encoding="utf-8")
+        self.assertIn("Допущения", index)
+        self.assertIn("берём ту же платёжку", index)
+        self.assertIn("переписать модуль оплаты", index)
+
     def test_a_downgrade_is_not_a_drop(self) -> None:
         # «Снят» значит перестал интересовать, «допущение» значит «ответили себе
         # сами». Смешать их — потерять различие, ради которого понижение и есть.
