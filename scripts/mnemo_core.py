@@ -845,6 +845,14 @@ def similar_records(text: str, records: list[dict], field: str,
     return sorted(out, key=lambda row: -row[2])
 
 
+# Какие состояния считаются «открытым вопросом». Константа, а не литерал на
+# месте: правило нужно и человеческой сводке, и сужению `--open-only`, а §6б п.8
+# требует обоих поведений сразу — допущение не в открытых И видно отдельной
+# секцией. Две копии одного условия разошлись бы молча, ровно как разошлись
+# `blocking_since` и `blocked_since` до появления §16 п.2.
+OPEN_QUESTION_STATES = ("open", "raised")
+
+
 def question_state(record: dict) -> str:
     """Состояние вопроса, выведенное из содержимого.
 

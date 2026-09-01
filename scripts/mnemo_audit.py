@@ -34,7 +34,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
-    SPEC_VERSION, STALE_AFTER_DAYS, MnemoError, blocked_since, days_blocked,
+    OPEN_QUESTION_STATES, SPEC_VERSION, STALE_AFTER_DAYS, MnemoError,
+    blocked_since, days_blocked,
     escalation, find_export, load_manifest, missing_attempt, question_state,
     raised_marks, resolve_person, stale_reason, superseded_ids,
 )
@@ -188,7 +189,7 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
     confirmed = [r for r in live if r["state"] == "verified"]
     claimed = [r for r in live if r["state"] == "done"]
     pending = [r for r in live if r["state"] in ("stated", "accepted")]
-    open_q = [q for q in questions if q["state"] in ("open", "raised")]
+    open_q = [q for q in questions if q["state"] in OPEN_QUESTION_STATES]
     # Допущение — не открытый вопрос: мы уже ответили себе сами, и держать его в
     # списке открытых значило бы отменить понижение.
     assumptions = [q for q in questions if q["state"] == "assumed"]
@@ -386,7 +387,8 @@ def main() -> int:
             data = {
                 "requirements": [r for r in data["requirements"]
                                  if not r["superseded"] and r["state"] in ("stated", "accepted")],
-                "questions": [q for q in data["questions"] if q["state"] in ("open", "raised")],
+                "questions": [q for q in data["questions"]
+                              if q["state"] in OPEN_QUESTION_STATES],
             }
         meta = manifest["export"]
         print(json.dumps({

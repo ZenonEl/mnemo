@@ -313,6 +313,22 @@ class DowngradeToAssumption(ExportCase):
         self.assertNotIn(ident,
                          [q["id"] for q in self.audit_json("--open-only")["questions"]])
 
+    def test_the_human_report_thins_the_open_list_too(self) -> None:
+        """§6б п.8 требует обоих поведений сразу, а не одного из них.
+
+        Правило «что считается открытым» нужно и сводке, и `--open-only`.
+        Пока оно стояло в двух литералах, сломать можно было тот, который не
+        читает ни один тест: сводка сама себе противоречила — «вопросов
+        открытых: 1» над секцией допущений с тем же идентификатором.
+        """
+        ident = self.a_question()
+        self.man("ask", "--id", ident,
+                 "--assumed", "берём ту же платёжку, что в прошлых проектах",
+                 "--cost-if-wrong", "переписать модуль оплаты и вебхуки, день")
+        out = self.audit().stdout
+        self.assertIn("Вопросов открытых: 0", out)
+        self.assertIn("ДОПУЩЕНИЯ", out)
+
     def test_a_downgraded_question_stays_visible_in_the_full_summary(self) -> None:
         ident = self.a_question()
         self.man("ask", "--id", ident,
