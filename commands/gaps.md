@@ -3,7 +3,7 @@ description: Показать и завести хвосты — чего в э�
 argument-hint: Опционально: чего не хватает
 ---
 
-Используй навык **mnemo:chat-export**.
+Используй навык **mnemo:work-state**.
 
 **Показать хвосты:** раздел «Хвосты» в `INDEX.md`, либо
 `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/mnemo_manifest.py show --export <dir>` и записи со `status != present`.

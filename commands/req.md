@@ -3,7 +3,7 @@ description: Требование заказчика — что от нас хо
 argument-hint: Цитата требования либо id для обновления состояния
 ---
 
-Используй навык **mnemo:chat-export**.
+Используй навык **mnemo:work-state**.
 
 **Завести:**
 ```
@@ -25,6 +25,25 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/mnemo_manifest.py req --export <dir> \
 ```
 ... req --export <dir> --id tNNN --state done --evidence "<коммит, скрин, прогон>"
 ```
+
+**Заблокировано — предъяви попытку:**
+```
+... req --export <dir> --id tNNN --blocking "<что стоит>" \
+  --tried "<что конкретно сделал>" --returned "<что вернулось дословно>" \
+  --dead-end "<что должно измениться снаружи>"
+```
+Из трёх полей выводится `escalation`: заполнены все — `theirs` (ждём чужого
+шага), нет — `ours` (следующий шаг наш). Незаполненная попытка запись не
+отменяет, но команда скажет вслух, что завела как `ours` и какого поля не хватило.
+
+**Проход самоопровержения** — после того, как сделал НОВУЮ попытку снять блокер:
+```
+... req --export <dir> --id tNNN --pass-outcome refuted --returned "<найденный обход>"
+... req --export <dir> --id tNNN --pass-outcome confirmed --returned "<вторая улика>"
+... req --export <dir> --id tNNN --pass-outcome insufficient
+```
+`confirmed` без пополнения `returned` команда сама переклассифицирует в
+`insufficient`: подтверждение без новой улики не принимается.
 
 ## Что важно
 

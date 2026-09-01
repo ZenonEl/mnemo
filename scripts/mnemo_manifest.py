@@ -242,7 +242,7 @@ def announce_in_instructions(export: Path, slug: str,
 - `{name}/summaries/findings-log.md` — что уже выяснено. Читать при возврате к работе.
 - Аудит архива — всё ли сделано, как хотел заказчик; что блокирует; что не
   спрошено. В Claude Code это `/mnemo:audit`, в Codex — скил
-  `mnemo:chat-export`.
+  `mnemo:work-state`.
 - `{name}/INDEX.md` — что вообще есть и откуда. Когда ищешь конкретный материал.
 
 **Правила:**
