@@ -821,6 +821,22 @@ def gate_attempt(values: dict) -> None:
 PASS_OUTCOMES = ("refuted", "confirmed", "insufficient")
 
 
+def require_id_for_pass(args) -> None:
+    """Проход применим только к существующей записи.
+
+    Механическая проверка прохода — сравнение старого `returned` с новым, и
+    старого у новой записи нет. Без этого отказа флаг на создании молча ничего
+    не делал бы: команда отвечает успехом, проход «выполнен», а не выполнено
+    ничего. Тихий холостой флаг хуже отсутствующего.
+    """
+    if getattr(args, "pass_outcome", None) and not getattr(args, "id", None):
+        raise MnemoError(
+            "--pass-outcome применяется к существующей записи: нужен --id. "
+            "Проход сравнивает старый returned с новым, а у новой записи "
+            "старого нет — сравнивать не с чем"
+        )
+
+
 def apply_pass_outcome(record: dict, outcome: str, fresh: str | None) -> list[str]:
     """Исход прохода самоопровержения — решает команда, а не модель.
 
@@ -1043,6 +1059,7 @@ def cmd_req(args) -> int:
     # остаётся требованием К ЗАПИСИ, и старые записи от него не страдают.
     gate_attempt({"tried": args.tried, "returned": args.returned,
                   "dead_end": args.dead_end})
+    require_id_for_pass(args)
 
     if getattr(args, "batch", None):
         if args.id:
@@ -1148,6 +1165,7 @@ def cmd_ask(args) -> int:
 
     gate_attempt({"tried": args.tried, "returned": args.returned,
                   "dead_end": args.dead_end, "self_attempt": args.self_attempt})
+    require_id_for_pass(args)
 
     if getattr(args, "batch", None):
         if args.id:

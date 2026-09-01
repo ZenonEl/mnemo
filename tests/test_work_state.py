@@ -214,6 +214,16 @@ class SelfRefutationPass(ExportCase):
         self.assertIsNone(record["dead_end"])
         self.assertIn("публичный фид", record["returned"])
 
+    def test_a_pass_on_a_new_record_is_refused_rather_than_ignored(self) -> None:
+        # Сравнивать не с чем: старого returned у новой записи нет. Тихо
+        # проглотить флаг значит отчитаться о проходе, которого не было.
+        done = self.man("req", "--quote", "нужен доступ к их API",
+                        "--blocking", "интеграция стоит",
+                        "--pass-outcome", "confirmed", "--returned", "молчат с 20.08")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("--id", done.stderr)
+        self.assertEqual(self.manifest()["requirements"], [])
+
     def test_refuted_without_a_description_is_refused(self) -> None:
         ident = self.blocked()
         done = self.man("req", "--id", ident, "--pass-outcome", "refuted")
