@@ -143,6 +143,25 @@ def check(root: Path) -> list[str]:
             f"QUERY.md обещает {in_doc.group(1)}"
         )
 
+    # 1б. И тело примера выдачи — тоже.
+    #
+    # Заголовок сверялся, а JSON под ним — нет, и расхождение прожило две
+    # редакции подряд: документ обещал одну версию, а пример в нём же учил
+    # проверять другую. Цена именно у примера: его копирует потребитель,
+    # пишущий сверку `query_contract`, — то есть ровно тот механизм, ради
+    # которого контракт и версионируется. Проверка, охраняющая заголовок и
+    # слепая к образцу, охраняет не то место.
+    if in_code and query_doc.is_file():
+        for sample in re.findall(r'"query_contract"\s*:\s*"([^"]+)"',
+                                 query_doc.read_text(encoding="utf-8")):
+            if sample != in_code.group(1):
+                problems.append(
+                    f"SPEC/QUERY.md: пример выдачи показывает "
+                    f"query_contract={sample!r}, а код отдаёт "
+                    f"{in_code.group(1)!r} — потребитель скопирует пример "
+                    "и напишет сверку не на ту версию"
+                )
+
     # 2. Правила линтера: объявленные в стандарте и реализованные — одно и то же.
     standard = (spec / "STANDARD.md").read_text(encoding="utf-8")
     verifier = (root / "scripts" / "mnemo_verify.py").read_text(encoding="utf-8")

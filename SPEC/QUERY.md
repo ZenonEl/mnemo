@@ -34,7 +34,7 @@ mnemo_audit.py --export <dir> --json --open-only
 
 ```json
 {
-  "query_contract": "1",
+  "query_contract": "3",
   "mnemo_spec": "1.5",
   "export": { "slug": "priyomka", "title": "Приёмка проекта" },
   "requirements": [ … ],
