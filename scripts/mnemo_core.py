@@ -665,9 +665,23 @@ def new_question(**kwargs: Any) -> dict:
         )
     if record.get("blocking_since"):
         parse_day(record["blocking_since"])
+    if not isinstance(kwargs.get("raised") or [], list):
+        # Правка манифеста руками приносит сюда что угодно. `list("вчера")`
+        # разваливало строку на буквы и падало AttributeError уже в цикле ниже,
+        # а §13 требует, чтобы непроверяемое было ошибкой, а не падением:
+        # traceback — не диагноз.
+        raise MnemoError(
+            f"{record['id']}: raised должен быть списком отметок «спрошено», "
+            f"а не {type(kwargs.get('raised')).__name__}"
+        )
     for mark in record["raised"]:
         # §6б называет `raised` несущим полем, но проверялось только наличие
         # ключей: мусорная дата проходила и печаталась в сводке как есть.
+        if not isinstance(mark, dict):
+            raise MnemoError(
+                f"{record['id']}: отметка «спрошено» должна быть объектом "
+                f"с полями to/at, получено {mark!r}"
+            )
         if not str(mark.get("to") or "").strip():
             raise MnemoError(f"{record['id']}: отметка «спрошено» без адресата")
         parse_day(str(mark.get("at") or ""))
@@ -692,10 +706,58 @@ def days_since(day: str | None) -> int | None:
     return (date.today() - then).days
 
 
+# Заглушки для повреждённой отметки «спрошено». Битую отметку показываем, а не
+# выбрасываем: §16 п.3 обещает, что одна испорченная запись видна и не прячет
+# остальные, а исчезнувшая молча отметка — это ровно то незаметное расхождение,
+# от которого контракт чтения и заведён.
+RAISED_UNKNOWN_TO = "<без адресата>"
+RAISED_UNKNOWN_AT = "<без даты>"
+
+
+def raised_marks(record: dict) -> list[dict]:
+    """Отметки «спрошено» в виде, пригодном для чтения без проверок на месте.
+
+    Манифест приходит снаружи и правится руками, поэтому `raised` бывает не
+    списком, элемент — не объектом, а у объекта не быть ключей. Каждый читатель
+    отметок разворачивал их сам, и любой из них падал: `'str' object has no
+    attribute 'get'` в сводке, в линтере и в генераторе INDEX одновременно.
+    Падение линтера здесь хуже прочих — §16 п.3 отправляет разбираться именно
+    к нему, а идти оказывалось некуда.
+
+    Разворачивание сведено в одно место и всегда возвращает список объектов с
+    ключами `to`, `at`, `where`. Чего в записи нет, заменяется заглушкой:
+    структура повреждена, и это должно быть видно в выводе, а не в traceback.
+    """
+    raw = record.get("raised")
+    if isinstance(raw, list):
+        marks: list = raw
+    elif not raw:
+        return []
+    else:
+        # `raised` вовсе не список — повреждена сама структура записи. Одна
+        # заглушка честнее пустоты: «отметки есть, прочитать их нельзя».
+        marks = [None]
+    out = []
+    for mark in marks:
+        if isinstance(mark, dict):
+            out.append({
+                "to": str(mark.get("to") or RAISED_UNKNOWN_TO),
+                "at": str(mark.get("at") or RAISED_UNKNOWN_AT),
+                "where": str(mark.get("where") or ""),
+            })
+        else:
+            out.append({"to": RAISED_UNKNOWN_TO, "at": RAISED_UNKNOWN_AT, "where": ""})
+    return out
+
+
 def last_raised(record: dict) -> str | None:
-    """Когда вопрос поднимали в последний раз."""
-    marks = [m.get("at") for m in record.get("raised") or [] if m.get("at")]
-    return max(marks) if marks else None
+    """Когда вопрос поднимали в последний раз.
+
+    Заглушки в счёт не идут: `<без даты>` сортируется выше настоящей даты и
+    заслонил бы её, а «протухло» считается именно от последней настоящей.
+    """
+    dates = [m["at"] for m in raised_marks(record) if days_since(m["at"]) is not None]
+    return max(dates) if dates else None
 
 
 def stale_reason(record: dict, kind: str, after: int = STALE_AFTER_DAYS) -> str | None:

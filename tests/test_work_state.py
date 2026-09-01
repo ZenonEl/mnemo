@@ -392,6 +392,102 @@ class DowngradeToAssumption(ExportCase):
         self.assertIn("V20", [e["code"] for e in report["errors"]])
 
 
+class BrokenRaisedMarks(ExportCase):
+    """Отметка «спрошено», пришедшая из чужого или правленого руками манифеста.
+
+    `SPEC/QUERY.md` п.3: команда не падает на одной битой записи, пряча
+    остальные, — разбираться по выводу линтера. Через команды такой манифест не
+    собрать, `new_question` его валидирует; но именно чужой и правленый руками
+    манифест этот пункт и защищает — ровно как линтерная сторона §14.
+
+    Дыр было две, обе старше этой ветки: `raised` не списком роняло
+    `last_raised` (`'str' object has no attribute 'get'`), а отметка без ключей
+    роняла сводку на `raised['at']`. Падал и линтер — то есть идти разбираться
+    было некуда.
+    """
+
+    def with_broken_marks(self) -> str:
+        good = self.a_question(text="живой вопрос")
+        self.man("ask", "--id", good, "--raised-to", "petr-ivanov",
+                 "--raised-at", "2026-08-20")
+        manifest = self.manifest()
+        manifest["questions"] += [
+            {"id": "q002", "text": "raised строкой", "blocking": "стоит",
+             "raised": "вчера"},
+            {"id": "q003", "text": "отметка без ключей", "blocking": "стоит",
+             "raised": [{"to": None}]},
+        ]
+        (self.export / "MANIFEST.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        return good
+
+    def test_the_summary_survives_and_hides_nothing(self) -> None:
+        good = self.with_broken_marks()
+        done = self.audit()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn(good, done.stdout)          # живая запись не спряталась
+        self.assertIn("q002", done.stdout)        # битая — видна
+        self.assertIn("q003", done.stdout)
+        self.assertIn("<без адресата>", done.stdout)   # заглушка, а не падение
+        self.assertEqual(self.audit("--json").returncode, 0)
+        self.assertEqual(self.audit("--json", "--open-only").returncode, 0)
+
+    def test_the_linter_diagnoses_instead_of_crashing(self) -> None:
+        # Падение линтера тут хуже прочих: §16 п.3 отправляет разбираться
+        # именно к нему, а traceback — не диагноз (§13).
+        self.with_broken_marks()
+        done = _run("mnemo_verify.py", "--export", str(self.export), "--json")
+        self.assertNotIn("Traceback", done.stderr)
+        report = json.loads(done.stdout)
+        broken = {e["where"]: e["message"] for e in report["errors"]
+                  if e["code"] == "V20"}
+        self.assertEqual(set(broken), {"q002", "q003"})
+        # Диагноз обязан называть поломку, а не только запись: «что-то не так с
+        # q002» отправляет человека искать заново.
+        self.assertIn("не список", broken["q002"])
+        self.assertIn("без адресата", broken["q003"])
+
+    def test_the_index_survives_and_marks_the_gap(self) -> None:
+        self.with_broken_marks()
+        done = _run("mnemo_render.py", "--export", str(self.export))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        index = (self.export / "INDEX.md").read_text(encoding="utf-8")
+        self.assertIn("2026-08-20", index)        # настоящая отметка цела
+        self.assertIn("<без даты>", index)        # битая показана заглушкой
+
+    def test_a_stub_date_never_shadows_a_real_one(self) -> None:
+        # `<без даты>` сортируется выше настоящей даты: попади заглушка в
+        # `last_raised`, «протухло» считалось бы от неё, и вопрос, спрошенный
+        # месяц назад, выглядел бы свежим.
+        ident = self.a_question()
+        self.man("ask", "--id", ident, "--raised-to", "petr-ivanov",
+                 "--raised-at", (date.today() - timedelta(days=30)).isoformat())
+        manifest = self.manifest()
+        for question in manifest["questions"]:
+            if question["id"] == ident:
+                question["raised"].append({"where": "чат"})   # ни to, ни at
+        (self.export / "MANIFEST.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        out = self.audit().stdout
+        self.assertIn("ПРОТУХЛО", out)
+        self.assertIn("30 дн. назад", out)
+
+    def test_the_write_path_refuses_instead_of_a_traceback(self) -> None:
+        # §13: непроверяемое — ошибка, а не падение. `list("вчера")` разваливало
+        # строку на буквы уже внутри контракта записи.
+        ident = self.a_question()
+        manifest = self.manifest()
+        for question in manifest["questions"]:
+            if question["id"] == ident:
+                question["raised"] = "вчера"
+        (self.export / "MANIFEST.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        done = self.man("ask", "--id", ident, "--impact", "что-то другое")
+        self.assertEqual(done.returncode, 1)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertIn("raised", done.stderr)
+
+
 class ReadContract(ExportCase):
     def test_the_contract_version_is_three(self) -> None:
         self.assertEqual(self.audit_json()["query_contract"], "3")

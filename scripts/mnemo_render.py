@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
     export_lock,
     INDEX_NAME, MnemoError, days_blocked, find_export, load_manifest,
-    question_state, required_spec, resolve_person, save_manifest, sha256_file,
+    question_state, raised_marks, required_spec, resolve_person, save_manifest,
+    sha256_file,
     superseded_ids,
 )
 
@@ -236,8 +237,8 @@ def render_index(manifest: dict) -> str:
             lines += ["| Состояние | Вопрос | Блокирует | Спрошено | id |",
                       "|---|---|---|---|---|"]
             for q in sorted(quests, key=lambda x: x.get("date", "")):
-                raised = q.get("raised") or []
-                asked = f"{raised[-1].get('at')} → {raised[-1].get('to')}" if raised else "нет"
+                marks = raised_marks(q)
+                asked = f"{marks[-1]['at']} → {marks[-1]['to']}" if marks else "нет"
                 age = days_blocked(q)
                 block = _escape(q.get("blocking") or "—")
                 if age and age > 0:

@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
     SPEC_VERSION, STALE_AFTER_DAYS, MnemoError, blocked_since, days_blocked,
     escalation, find_export, load_manifest, missing_attempt, question_state,
-    resolve_person, stale_reason, superseded_ids,
+    raised_marks, resolve_person, stale_reason, superseded_ids,
 )
 
 # Версия контракта чтения — своя, не версия стандарта: формат вывода может
@@ -234,18 +234,19 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
                             + (f" · {', '.join(record['based_on'])}"
                                if record.get("based_on") else ""))
             else:
-                mark = "уже спрашивали" if record["raised"] else "НЕ СПРАШИВАЛИ"
+                marks = raised_marks(record)
+                mark = "уже спрашивали" if marks else "НЕ СПРАШИВАЛИ"
                 rows.append(f"  {record['id']}  {cut(visible(record, 'text'), 70)}{tail}")
                 rows.append(f"       стоит: {record['blocking']}   [{mark}]")
-                if not record["raised"] and record.get("asked_of"):
+                if not marks and record.get("asked_of"):
                     # «Не спрашивали» без указания, у кого спрашивать, — половина
                     # ответа. Именно эта строка объявлена самой ценной в выводе.
                     rows.append(f"       спросить у: {who(manifest, record['asked_of'])}")
                 if record.get("impact"):
                     rows.append(f"       от ответа зависит: {cut(record['impact'], 70)}")
-                for raised in record["raised"]:
+                for raised in marks:
                     rows.append(f"       спрошено {raised['at']} у {who(manifest, raised['to'])}"
-                                + (f" ({raised['where']})" if raised.get("where") else ""))
+                                + (f" ({raised['where']})" if raised["where"] else ""))
             if record.get("tried"):
                 rows.append(f"       пробовали: {cut(record['tried'], 70)}")
             if record.get("returned"):
@@ -284,8 +285,9 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
         out += ["━━━ ОТКРЫТЫЕ ВОПРОСЫ ━━━", ""]
         for q in rest_q:
             tail = ""
-            if q["raised"]:
-                last = q["raised"][-1]
+            marks = raised_marks(q)
+            if marks:
+                last = marks[-1]
                 tail = f"  ← спрошено {last['at']} у {who(manifest, last['to'])}"
             out.append(f"  {Q_MARK[q['state']]} {q['id']}  {cut(visible(q, 'text'), 66)}{tail}")
         out.append("")
@@ -353,7 +355,7 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
     else:
         out.append(f"Да: все {len(confirmed)} требований подтверждены доказательством.")
     if open_q:
-        never = [q for q in open_q if not q["raised"]]
+        never = [q for q in open_q if not raised_marks(q)]
         never_blocking = [q for q in never if q.get("blocking")]
         if never_blocking:
             out.append(f"Блокирует и ни разу не спрошено: {len(never_blocking)} — "
