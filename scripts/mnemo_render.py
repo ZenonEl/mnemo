@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
     export_lock,
     INDEX_NAME, MnemoError, days_blocked, find_export, load_manifest,
-    question_state, required_spec, resolve_person, save_manifest, sha256_file,
+    question_state, raised_marks, required_spec, resolve_person, save_manifest,
+    sha256_file,
     superseded_ids,
 )
 
@@ -236,8 +237,8 @@ def render_index(manifest: dict) -> str:
             lines += ["| Состояние | Вопрос | Блокирует | Спрошено | id |",
                       "|---|---|---|---|---|"]
             for q in sorted(quests, key=lambda x: x.get("date", "")):
-                raised = q.get("raised") or []
-                asked = f"{raised[-1].get('at')} → {raised[-1].get('to')}" if raised else "нет"
+                marks = raised_marks(q)
+                asked = f"{marks[-1]['at']} → {marks[-1]['to']}" if marks else "нет"
                 age = days_blocked(q)
                 block = _escape(q.get("blocking") or "—")
                 if age and age > 0:
@@ -246,6 +247,20 @@ def render_index(manifest: dict) -> str:
                     f"| {question_state(q)} | {_escape(('‹изъято›' if q.get('redactions') else str(q.get('text') or '<без текста>'))[:56])} | "
                     f"{block} | {_escape(asked)} | `{q.get('id')}` |")
             lines.append("")
+            # Состояние `assumed` без текста допущения — половина сведений:
+            # видно, что вопрос не задан, и не видно, чем его заменили. §1
+            # обещает, что экспорт читается без инструмента, а значит цена
+            # ошибки обязана лежать в самом каталоге, а не только в сводке.
+            assumed = [q for q in quests if question_state(q) == "assumed"]
+            if assumed:
+                lines += ["**Допущения** — что решили не спрашивать и чем рискуем:", ""]
+                for q in assumed:
+                    shown = "‹изъято›" if q.get("redactions") else str(q.get("assumed"))
+                    cost = "‹изъято›" if q.get("redactions") else str(
+                        q.get("cost_if_wrong") or "—")
+                    lines.append(f"- `{q.get('id')}` приняли: {_escape(shown)}")
+                    lines.append(f"  — если неверно: {_escape(cost)}")
+                lines.append("")
 
     # --- хвосты ----------------------------------------------------------
     lines += ["## Хвосты", ""]

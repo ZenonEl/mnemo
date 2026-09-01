@@ -37,6 +37,9 @@ node_modules/
 dist/
 *.log
 
+# --- прогоны eval: кейсы в git, результаты нет ---
+evals/results/
+
 # --- os / editor ---
 .DS_Store
 .idea/

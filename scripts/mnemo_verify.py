@@ -19,9 +19,11 @@ from urllib.parse import unquote
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_core import (  # noqa: E402
     ALLOWED_TOP, ATTRIBUTIONS, CONTOURS, FIDELITIES, INDEX_NAME, MANIFEST_NAME,
-    PERSON_ROLES, REDACTION_REASONS, REQUIRED_FILES, REQUIREMENT_STATES,
+    PERSON_ROLES, RAISED_UNKNOWN_TO, REDACTION_REASONS, REQUIRED_FILES,
+    REQUIREMENT_STATES,
     SOURCES, STATUSES, MnemoError, all_tracked_paths, find_export, iter_raw_files,
-    load_manifest, parse_day, question_state, rel, required_spec, sha256_file,
+    load_manifest, parse_day, question_state, raised_marks, rel, required_spec,
+    sha256_file,
     supersede_cycles, unknown_names,
 )
 
@@ -176,8 +178,11 @@ def check(export: Path) -> Report:
     # проходил молча, а сводка печатала его как опознанного.
     everyone += [r.get("wanted_by") for r in manifest.get("requirements", [])]
     everyone += [q.get("asked_of") for q in manifest.get("questions", [])]
-    everyone += [m.get("to") for q in manifest.get("questions", [])
-                 for m in (q.get("raised") or [])]
+    # Заглушка вместо адресата — не имя, и в реестре ей делать нечего:
+    # V14 звала бы заводить человека по имени «<без адресата>», а настоящая
+    # поломка уже названа ошибкой V20 строкой ниже.
+    everyone += [m["to"] for q in manifest.get("questions", [])
+                 for m in raised_marks(q) if m["to"] != RAISED_UNKNOWN_TO]
     everyone = [n for n in everyone if n]
     strangers = unknown_names(manifest, everyone)
     if strangers:
@@ -322,8 +327,29 @@ def check(export: Path) -> Report:
                 "вопрос закрывается ссылкой на доказательство, а не словом",
                 qid,
             )
-        for raised in record.get("raised") or []:
-            if not raised.get("to") or not raised.get("at"):
+        if str(record.get("assumed") or "").strip() and \
+                not str(record.get("cost_if_wrong") or "").strip():
+            # Дублирует проверку в момент записи намеренно (§13): запись могла
+            # быть сделана другим инструментом или правкой файла руками.
+            # Допущение без цены промаха — способ убрать вопрос из списка,
+            # ничем не заплатив, то есть то же молчаливое удаление.
+            report.error(
+                "V20",
+                "непустое assumed без cost_if_wrong — допущение обязано называть, "
+                "что придётся переделать, если оно неверно",
+                qid,
+            )
+        marks = record.get("raised")
+        if marks and not isinstance(marks, list):
+            # Падать здесь нельзя вдвойне: §16 п.3 отправляет разбираться с
+            # повреждённой записью именно к линтеру, и traceback вместо
+            # диагноза не оставляет человеку ничего.
+            report.error("V20", f"raised не список отметок, а {type(marks).__name__}", qid)
+            marks = []
+        for raised in marks or []:
+            if not isinstance(raised, dict):
+                report.error("V20", f"отметка «спрошено» не объект: {raised!r}", qid)
+            elif not raised.get("to") or not raised.get("at"):
                 report.error("V20", "отметка «спрошено» без адресата или даты", qid)
         if question_state(record) == "open" and record.get("blocking"):
             report.warn(

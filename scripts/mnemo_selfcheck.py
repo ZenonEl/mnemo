@@ -143,6 +143,25 @@ def check(root: Path) -> list[str]:
             f"QUERY.md обещает {in_doc.group(1)}"
         )
 
+    # 1б. И тело примера выдачи — тоже.
+    #
+    # Заголовок сверялся, а JSON под ним — нет, и расхождение прожило две
+    # редакции подряд: документ обещал одну версию, а пример в нём же учил
+    # проверять другую. Цена именно у примера: его копирует потребитель,
+    # пишущий сверку `query_contract`, — то есть ровно тот механизм, ради
+    # которого контракт и версионируется. Проверка, охраняющая заголовок и
+    # слепая к образцу, охраняет не то место.
+    if in_code and query_doc.is_file():
+        for sample in re.findall(r'"query_contract"\s*:\s*"([^"]+)"',
+                                 query_doc.read_text(encoding="utf-8")):
+            if sample != in_code.group(1):
+                problems.append(
+                    f"SPEC/QUERY.md: пример выдачи показывает "
+                    f"query_contract={sample!r}, а код отдаёт "
+                    f"{in_code.group(1)!r} — потребитель скопирует пример "
+                    "и напишет сверку не на ту версию"
+                )
+
     # 2. Правила линтера: объявленные в стандарте и реализованные — одно и то же.
     standard = (spec / "STANDARD.md").read_text(encoding="utf-8")
     verifier = (root / "scripts" / "mnemo_verify.py").read_text(encoding="utf-8")
@@ -252,11 +271,35 @@ def check(root: Path) -> list[str]:
         problems.append('.agents/plugins/marketplace.json: source.path должен быть "./" — '
                         "плагин занимает весь репозиторий, а не подкаталог")
 
-    # 5. Скрипты, упомянутые в навыке, существуют.
-    skill = (root / "skills" / "chat-export" / "SKILL.md").read_text(encoding="utf-8")
-    for name in re.findall(r"`(mnemo_\w+\.py)`", skill):
-        if not (root / "scripts" / name).is_file():
-            problems.append(f"SKILL.md ссылается на несуществующий {name}")
+    # 5. Скрипты, упомянутые в навыках, существуют.
+    #
+    # Навыков больше одного, и проверка обязана смотреть на все: раньше здесь
+    # стоял путь к chat-export, и второй навык прошёл бы мимо неё целиком —
+    # ровно тот класс дрейфа, ради которого самопроверка и заведена.
+    skills = sorted((root / "skills").glob("*/SKILL.md"))
+    if not skills:
+        problems.append("в skills/ нет ни одного SKILL.md — плагину нечем "
+                        "срабатывать автоматически")
+    for doc in skills:
+        text = doc.read_text(encoding="utf-8")
+        for name in re.findall(r"`(mnemo_\w+\.py)`", text):
+            if not (root / "scripts" / name).is_file():
+                problems.append(
+                    f"skills/{doc.parent.name}/SKILL.md ссылается на несуществующий {name}")
+        # Frontmatter `name` обязан совпадать с каталогом: под Codex навык
+        # опознаётся по каталогу, под Claude Code — по имени, и расхождение
+        # даёт навык, который в одном хосте зовётся не так, как в другом.
+        declared_name = re.search(r"^name:\s*(\S+)\s*$", text, re.M)
+        if not declared_name:
+            problems.append(f"skills/{doc.parent.name}/SKILL.md не объявляет name")
+        elif declared_name.group(1).strip('"\'') != doc.parent.name:
+            problems.append(
+                f"skills/{doc.parent.name}/SKILL.md объявляет name "
+                f"{declared_name.group(1)} — каталог и имя навыка обязаны совпадать")
+        if not (doc.parent / "agents" / "openai.yaml").is_file():
+            problems.append(
+                f"skills/{doc.parent.name}/ без agents/openai.yaml — "
+                "Codex не получит метаданных навыка")
 
     # 6. Всё компилируется.
     files = [str(p) for p in sorted((root / "scripts").rglob("*.py"))]
