@@ -1096,6 +1096,16 @@ def cmd_req(args) -> int:
             # отменяют одну и ту же, и девятнадцать из них — неправда.
             raise MnemoError("--supersedes нельзя применить к пакету: отмена оформляется "
                              "поштучно через req --id")
+        if args.tried or args.returned or args.dead_end:
+            # То же самое про блокировку. Поля попытки доказывают, что мы уже
+            # что-то сделали; одна предъявленная попытка на двадцать разных
+            # блокеров отправляет наверх девятнадцать неподтверждённых.
+            # `--blocking` в пакете остаётся: записи заведутся со стороной
+            # «шаг наш» и громким объяснением, почему.
+            raise MnemoError("--tried / --returned / --dead-end к пакету не "
+                             "применяются: попытка — про конкретную запись. "
+                             "Заводи пакетом, объявляй чужой шаг по одной "
+                             "командой с --id")
         entries = read_batch(Path(args.batch).expanduser())
         fresh, _ = batch_plan(entries, [r["quote"] for r in manifest["requirements"]],
                               "требование")
@@ -1208,36 +1218,36 @@ def cmd_ask(args) -> int:
             # промаха — неправда в девятнадцати случаях из двадцати.
             raise MnemoError("--assumed / --cost-if-wrong / --pass-outcome к пакету "
                              "не применяются: допущение и проход — про конкретную запись")
+        if args.apply:
+            # Пакет вопросов не заводится, и это не ограничение реализации.
+            #
+            # `--self-attempt` — доказательство СОВЕРШЁННОГО действия по одному
+            # конкретному вопросу. Пакет по устройству делит флаги на всех, то
+            # есть одна попытка объявлялась бы предъявленной двадцать раз:
+            # «прочитал доки платёжки» оказывалось предъявлено и в ответ на
+            # «кто ведёт поддержку». Главный заслон обходился оптом.
+            #
+            # Запретить один флаг было нельзя — он обязателен, и запрет убил бы
+            # команду целиком. Поэтому пакет остаётся тем, чем честно может
+            # быть: планировщиком. Требований это не касается — там заслон
+            # `--quote` берётся из каждой строки файла.
+            raise MnemoError(
+                "пакетом вопросы не заводятся: --self-attempt доказывает попытку "
+                "по КОНКРЕТНОМУ вопросу, а один флаг на пачку объявил бы её "
+                "предъявленной там, где её не было.\n"
+                "    Оставь --batch без --apply — получишь список и отсев "
+                "повторов, затем заводи по одному.\n"
+                "    Требований это не касается: req --batch --apply работает "
+                "как прежде."
+            )
         entries = read_batch(Path(args.batch).expanduser())
-        # Заслон действует и на пакет: двадцать вопросов без impact — это
-        # двадцать раз тот же мусор, а не исключение из правила. `based_on`
-        # берётся из хвоста строки после `::` либо из общего флага.
-        for text, refs in entries:
-            gate_question({"impact": args.impact, "asked_of": args.asked_of,
-                           "based_on": refs or args.based_on,
-                           "self_attempt": args.self_attempt})
         fresh, _ = batch_plan(entries, [q["text"] for q in manifest["questions"]], "вопрос")
         report_similar_batch(fresh, manifest["questions"], "text", args.anyway, "вопрос")
-        if not args.apply:
-            print("\n— это план. Ничего не изменено. Повтори с --apply.")
-            return 0
-        if not fresh:
-            print("\nНовых вопросов нет — манифест не тронут.")
-            return 0
-        for text, refs in fresh:
-            record = new_question(
-                id=next_id(manifest, "question"), text=text, impact=args.impact,
-                blocking=args.blocking, blocking_since=args.blocking_since,
-                self_attempt=args.self_attempt, tried=args.tried,
-                returned=args.returned, dead_end=args.dead_end,
-                asked_of=args.asked_of,
-                based_on=refs or [b.strip() for b in (args.based_on or "").split(",") if b.strip()],
-                date=args.date,
-            )
-            manifest["questions"].append(record)
-            print(f"{record['id']}  {question_state(record)}  {record['text'][:56]}")
-            announce_escalation(record)
-        save_manifest(export, manifest)
+        print("\n— это список кандидатов, ничего не заведено. По каждому, который")
+        print("  пережил свои заслоны, выполни:")
+        print("\n    mnemo_manifest.py ask --export <dir> --text \"<вопрос>\" \\")
+        print("      --impact <что меняется> --asked-of <кто> --based-on ctx:<slug>#iNNN \\")
+        print("      --self-attempt <чем сам пробовал закрыть>")
         return 0
 
     if args.id:

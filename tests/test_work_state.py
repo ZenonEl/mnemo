@@ -622,3 +622,63 @@ class SpecVersionDriftIsCaughtByLinter(ExportCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BatchCannotShareAnAttempt(ExportCase):
+    """Попытка — утверждение о совершённом действии, а не признак пачки.
+
+    Пакет по устройству делит флаги на все записи. Для `--impact` это
+    удобство: влияние у пачки правда часто одно. Для попытки — неправда:
+    действие либо было по этой записи, либо нет, и «часто одно» тут не
+    работает. Одна предъявленная попытка отправляла наверх двадцать
+    неподтверждённых блокеров, а один `--self-attempt` объявлялся
+    предъявленным в ответ на двадцать разных вопросов.
+    """
+
+    def batch_file(self, *lines: str) -> str:
+        path = self.dir / "batch.md"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return str(path)
+
+    def test_requirements_refuse_a_shared_attempt(self) -> None:
+        batch = self.batch_file("нужен доступ к их API", "нужен доступ к базе")
+        done = self.man("req", "--batch", batch, "--apply",
+                        "--wanted-by", "petr-ivanov", "--blocking", "работа стоит",
+                        "--tried", "написал в поддержку 25 августа",
+                        "--returned", "403 Forbidden, ключ не выдан",
+                        "--dead-end", "их администратор должен выдать ключ")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("к пакету не", done.stderr)
+        self.assertEqual(self.manifest()["requirements"], [])
+
+    def test_a_batch_without_an_attempt_still_works_and_lands_on_our_side(self) -> None:
+        """Запрет не должен убивать пакет: он про попытку, не про блокировку."""
+        batch = self.batch_file("нужен доступ к их API", "нужен доступ к базе")
+        done = self.man("req", "--batch", batch, "--apply",
+                        "--wanted-by", "petr-ivanov", "--blocking", "работа стоит")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        blocked = [r for r in self.manifest()["requirements"] if r["blocking"]]
+        self.assertEqual(len(blocked), 2)
+        self.assertIn("ours", done.stdout)
+
+    def test_questions_are_not_created_in_bulk_at_all(self) -> None:
+        """`--self-attempt` обязателен, поэтому запрет флага убил бы команду.
+
+        Пакет остаётся тем, чем честно может быть, — планировщиком.
+        """
+        batch = self.batch_file("точно ли эта платёжка", "нужна ли админка")
+        done = self.man("ask", "--batch", batch, "--apply",
+                        "--impact", "меняет реализацию", "--asked-of", "petr-ivanov",
+                        "--based-on", "ctx:priyomka#i004",
+                        "--self-attempt", "прочитал доки платёжки")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("пакетом вопросы не заводятся", done.stderr)
+        self.assertEqual(self.manifest()["questions"], [])
+
+    def test_the_plan_still_lists_candidates_and_names_the_next_command(self) -> None:
+        batch = self.batch_file("точно ли эта платёжка", "нужна ли админка")
+        done = self.man("ask", "--batch", batch)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("нужна ли админка", done.stdout)
+        self.assertIn("--self-attempt", done.stdout)
+        self.assertEqual(self.manifest()["questions"], [])
