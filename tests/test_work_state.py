@@ -291,6 +291,29 @@ class ReadContract(ExportCase):
     def test_the_contract_version_is_three(self) -> None:
         self.assertEqual(self.audit_json()["query_contract"], "3")
 
+    def test_a_broken_record_does_not_hide_the_rest(self) -> None:
+        """`SPEC/QUERY.md`, «Устойчивость к повреждённой записи».
+
+        Манифест могли править руками или сторонним кодом. Сводка обязана
+        показать битую запись, а не упасть на ней: падение прячет и все
+        остальные, а разбираться человеку — по выводу линтера.
+
+        Ловушка здесь конкретная: у повреждённой записи `id` подменяется
+        заглушкой «?», и разделение блокирующего на требования и вопросы по
+        первой букве идентификатора отправило бы требование в ветку вопроса.
+        """
+        good = self.a_requirement(quote="выгрузка остатков раз в час",
+                                  blocking="нет ключа")
+        manifest = self.manifest()
+        manifest["requirements"].append({"blocking": "тоже стоит"})  # ни id, ни quote
+        manifest["questions"].append({"blocking": "и это"})
+        (self.export / "MANIFEST.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        done = self.audit()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn(good, done.stdout)
+        self.assertEqual(self.audit("--json").returncode, 0)
+
     def test_the_standard_version_agrees_with_the_document(self) -> None:
         header = (ROOT / "SPEC" / "STANDARD.md").read_text(encoding="utf-8")
         self.assertIn(f"**Версия стандарта:** {SPEC_VERSION}", header)

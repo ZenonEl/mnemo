@@ -216,10 +216,15 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
                    "проверь, что зависевшее от них пересмотрено")
     out.append("")
 
-    def block_lines(records: list[dict]) -> list[str]:
+    def block_lines(pairs: list[tuple[str, dict]]) -> list[str]:
+        # Род записи передаётся явно, а не угадывается по букве идентификатора.
+        # У повреждённой записи `id` подменяется заглушкой «?», и угадывание
+        # отправило бы требование в ветку вопроса — к `record["raised"]`,
+        # которого у требования нет. Контракт чтения обещает, что одна битая
+        # запись не прячет остальные, а не что она их роняет.
         rows = []
-        for record in records:
-            is_req = str(record["id"]).startswith("t")
+        for kind, record in pairs:
+            is_req = kind == "requirement"
             age = days_blocked(record)
             tail = f"  ({age} дн.)" if age is not None and age > 0 else ""
             if is_req:
@@ -256,10 +261,10 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
                             "в ours; предъяви --tried / --returned / --dead-end")
         return rows
 
-    blocking = [r for r in pending if r.get("blocking")] + \
-               [q for q in open_q if q.get("blocking")]
-    theirs = [b for b in blocking if b.get("escalation") == "theirs"]
-    ours = [b for b in blocking if b.get("escalation") != "theirs"]
+    blocking = [("requirement", r) for r in pending if r.get("blocking")] + \
+               [("question", q) for q in open_q if q.get("blocking")]
+    theirs = [p for p in blocking if p[1].get("escalation") == "theirs"]
+    ours = [p for p in blocking if p[1].get("escalation") != "theirs"]
     if theirs:
         # Сверху — только чужое: это то, что уходит наверх и требует чужого
         # действия. Своё стоит ниже, потому что по нему следующий шаг наш и
@@ -271,8 +276,8 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
         out += ["━━━ РАБОТА СТОИТ, НО СЛЕДУЮЩИЙ ШАГ НАШ (escalation=ours) ━━━", ""]
         out += block_lines(ours)
         out.append("")
-    blocking_r = [r for r in blocking if str(r["id"]).startswith("t")]
-    blocking_q = [q for q in blocking if not str(q["id"]).startswith("t")]
+    blocking_r = [r for kind, r in blocking if kind == "requirement"]
+    blocking_q = [q for kind, q in blocking if kind == "question"]
 
     rest_q = [q for q in open_q if not q.get("blocking")]
     if rest_q:
