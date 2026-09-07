@@ -85,6 +85,7 @@ def build(export: Path, out: Path, manifest: dict, public: list[dict],
     meta["contour"] = "public"
     meta["title"] = f"{meta['title']} — публичный срез"
     meta["participants"] = []
+    meta.pop("audiences", None)
     slim = {
         "mnemo_spec": manifest["mnemo_spec"],
         "export": meta,

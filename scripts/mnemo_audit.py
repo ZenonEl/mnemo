@@ -39,6 +39,7 @@ from mnemo_core import (  # noqa: E402
     escalation, find_export, load_manifest, missing_attempt, question_state,
     raised_marks, resolve_person, stale_reason, superseded_ids,
 )
+from mnemo_reconcile import packages_contract, review_contract, sync_contract  # noqa: E402
 
 # Версия контракта чтения — своя, не версия стандарта: формат вывода может
 # устояться раньше, чем формат манифеста, и наоборот. Нормативное описание —
@@ -217,6 +218,47 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
                    "проверь, что зависевшее от них пересмотрено")
     out.append("")
 
+    packages = packages_contract(manifest)
+    reviews = [review_contract(manifest, review) for review in manifest.get("reviews", [])]
+    sync = sync_contract(manifest, packages, reviews)
+    if packages or reviews:
+        out += ["━━━ ПАКЕТЫ И СВЕРКИ ━━━", ""]
+        uncovered = [package for package in packages if not package.get("covered")]
+        if uncovered:
+            out.append(f"  НЕ РАЗОБРАНО: {len(uncovered)} пакетов — "
+                       + ", ".join(package["id"] for package in uncovered))
+            out.append("       следующий шаг: review --scope <pNNN> с полным покрытием")
+        else:
+            out.append(f"  Все пакеты разобраны: {len(packages)}")
+        pending_reviews = [review for review in reviews
+                           if review.get("material") and any(
+                               state.get("status") == "pending"
+                               for state in review.get("audiences", {}).values())]
+        if pending_reviews:
+            out.append("  МАТЕРИАЛЬНОЕ БЕЗ ДОСТАВКИ: "
+                       + ", ".join(review["id"] for review in pending_reviews))
+            out.append("       следующий шаг: подготовить feedback и записать deliver после отправки")
+        out.append("")
+
+    audiences = manifest.get("export", {}).get("audiences", [])
+    if audiences or reviews:
+        out += ["━━━ СИНХРОНИЗАЦИЯ ПО АУДИТОРИЯМ ━━━", ""]
+        if not audiences:
+            out.append("  Аудитории не настроены — обязательная доставка не отслеживается.")
+        for audience in audiences:
+            name = audience.get("name")
+            pending_sync = sync.get("pending_for", {}).get(name, [])
+            delivered = sum(
+                1 for review in reviews
+                if review.get("audiences", {}).get(name, {}).get("status") == "delivered"
+            )
+            if pending_sync:
+                out.append(f"  {name}: ждёт доставки {len(pending_sync)} — "
+                           f"{', '.join(pending_sync)}")
+            else:
+                out.append(f"  {name}: хвостов нет; доставлено сверок {delivered}")
+        out.append("")
+
     def block_lines(pairs: list[tuple[str, dict]]) -> list[str]:
         # Род записи передаётся явно, а не угадывается по букве идентификатора.
         # У повреждённой записи `id` подменяется заглушкой «?», и угадывание
@@ -391,6 +433,36 @@ def main() -> int:
                               if q["state"] in OPEN_QUESTION_STATES],
             }
         meta = manifest["export"]
+        packages = packages_contract(manifest)
+        reviews = [review_contract(manifest, review)
+                   for review in manifest.get("reviews", [])]
+        if manifest.get("reviews"):
+            selected: dict[str, list[dict]] = {}
+            for review in manifest.get("reviews", []):
+                for feedback in review.get("feedback", []):
+                    choice = feedback.get("selected_question") or {}
+                    question_id = choice.get("id") if isinstance(choice, dict) else choice
+                    if question_id:
+                        selected.setdefault(question_id, []).append(
+                            {"s": review.get("id"), "n": feedback.get("n")})
+            for question in data["questions"]:
+                question["selected_in"] = selected.get(question.get("id"), [])
+        if args.open_only:
+            reviews = [review for review in reviews
+                       if any(state.get("status") == "pending"
+                              for state in review.get("audiences", {}).values())]
+        def current(records):
+            replaced = {r.get("supersedes"): r.get("id") for r in records
+                        if r.get("supersedes")}
+            return [{**record, "superseded_by": replaced.get(record.get("id"))}
+                    for record in records]
+        decisions = current(manifest.get("decisions", []))
+        facts = [{**record,
+                  "superseded_by": {f.get("supersedes"): f.get("id")
+                                    for f in manifest.get("facts", [])
+                                    if f.get("supersedes")}.get(record.get("id")),
+                  "standing": "verified" if record.get("verification") else "claim"}
+                 for record in manifest.get("facts", [])]
         print(json.dumps({
             "query_contract": QUERY_CONTRACT,
             "mnemo_spec": manifest.get("mnemo_spec", SPEC_VERSION),
@@ -398,8 +470,15 @@ def main() -> int:
             # ссылку не построить, и он полез бы за ней в манифест — ровно то,
             # чего контракт чтения должен избавить.
             "export": {"slug": meta.get("slug"), "title": meta.get("title")},
+            "capabilities": ["packages", "decisions", "facts", "reviews", "audiences", "sync"],
             **{bucket: [for_contract(r) for r in records]
                for bucket, records in data.items()},
+            "packages": packages,
+            "decisions": decisions,
+            "facts": facts,
+            "reviews": reviews,
+            "audiences": list(meta.get("audiences") or []),
+            "sync": sync_contract(manifest, packages, reviews),
         }, ensure_ascii=False, indent=2))
     else:
         print("\n".join(report(manifest, data, args.open_only)))

@@ -26,6 +26,7 @@ from mnemo_core import (  # noqa: E402
     sha256_file,
     superseded_ids,
 )
+from mnemo_reconcile import review_contract  # noqa: E402
 
 GENERATED_NOTE = (
     "<!-- СГЕНЕРИРОВАНО mnemo из MANIFEST.json. Правки здесь будут потеряны "
@@ -349,6 +350,101 @@ def render_redactions(manifest: dict) -> str:
     return "\n".join(lines)
 
 
+def render_project_state(manifest: dict) -> str:
+    """Текущая проекция проекта без сочинённой связующей прозы."""
+    lines = [f"# Состояние проекта — {manifest['export']['title']}", "", GENERATED_NOTE, ""]
+    decisions = manifest.get("decisions", [])
+    facts = manifest.get("facts", [])
+    dead_d = {r.get("supersedes") for r in decisions if r.get("supersedes")}
+    dead_f = {r.get("supersedes") for r in facts if r.get("supersedes")}
+
+    def facet_section(title: str, facet: str) -> None:
+        records = [("решение", r) for r in decisions
+                   if r.get("facet", "product") == facet and r.get("id") not in dead_d]
+        records += [("утверждение", r) for r in facts
+                    if r.get("facet", "product") == facet and r.get("id") not in dead_f]
+        if not records:
+            return
+        lines.extend([f"## {title}", ""])
+        for kind, record in records:
+            area = f" · область: {record['area']}" if record.get("area") else ""
+            standing = (" · проверено" if record.get("verification") else " · заявление") \
+                if kind == "утверждение" else ""
+            lines.append(f"- `{record['id']}` {record['text']} _({kind}{standing}{area})_")
+        lines.append("")
+
+    facet_section("Цель", "goal")
+    facet_section("Этап", "stage")
+    old_stages = [r for r in decisions if r.get("facet") == "stage" and r.get("id") in dead_d]
+    if old_stages:
+        lines.extend(["<details>", "<summary>История этапов</summary>", ""])
+        lines.extend(f"- `{r['id']}` {r['text']}" for r in old_stages)
+        lines.extend(["", "</details>", ""])
+    facet_section("Границы", "scope")
+    facet_section("Модель продукта", "product")
+
+    requirements = [r for r in manifest.get("requirements", [])
+                    if r.get("id") not in superseded_ids(manifest)
+                    and r.get("state") != "dropped"]
+    if requirements:
+        lines.extend(["## Требования", ""])
+        for record in requirements:
+            evidence = f" · подтверждение: {record['evidence']}" if record.get("evidence") else ""
+            blocking = f" · блокирует: {record['blocking']}" if record.get("blocking") else ""
+            stage = f" · этап: {record['stage']}" if record.get("stage") else ""
+            lines.append(f"- `{record['id']}` [{record.get('state', 'stated')}] "
+                         f"{record.get('quote', '')}{evidence}{blocking}{stage}")
+        lines.append("")
+
+    questions = manifest.get("questions", [])
+    opened = [q for q in questions if question_state(q) in ("open", "raised")]
+    assumed = [q for q in questions if question_state(q) == "assumed"]
+    if opened:
+        lines.extend(["## Открытое", ""])
+        for record in opened:
+            escalation = " · шаг: " + ("снаружи" if record.get("dead_end") else "наш") \
+                if record.get("blocking") else ""
+            lines.append(f"- `{record['id']}` [{question_state(record)}] "
+                         f"{record.get('text', '')}{escalation}")
+        lines.append("")
+    if assumed:
+        lines.extend(["### Допущения", ""])
+        for record in assumed:
+            lines.append(f"- `{record['id']}` {record.get('assumed')} · если неверно: "
+                         f"{record.get('cost_if_wrong')}")
+        lines.append("")
+
+    reviews = [review_contract(manifest, r) for r in manifest.get("reviews", [])]
+    sync_rows = [(review["id"], audience, state)
+                 for review in reviews for audience, state in review["audiences"].items()]
+    if sync_rows:
+        lines.extend(["## Синхронизация", ""])
+        for review_id, audience, state in sync_rows:
+            reason = f" · {state['reason']}" if state.get("reason") else ""
+            lines.append(f"- `{review_id}` → {audience}: **{state['status']}**{reason}")
+        lines.append("")
+
+    impacts = [(review["id"], impact) for review in reviews
+               for impact in review.get("impacts", [])]
+    if impacts:
+        lines.extend(["## Последствия", ""])
+        for review_id, impact in impacts:
+            affects = ", ".join(impact.get("affects") or [])
+            tail = f" · затрагивает: {affects}" if affects else ""
+            lines.append(f"- `{review_id}.n{impact.get('n')}` [{impact.get('kind')}] "
+                         f"{impact.get('text')}{tail}")
+        lines.append("")
+
+    changes = [(review["id"], change) for review in reviews
+               for change in review.get("changes", [])]
+    if changes:
+        lines.extend(["## Изменения", ""])
+        for review_id, change in changes:
+            lines.append(f"- `{review_id}` {change.get('action')} `{change.get('record')}`")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def sync(export: Path, rehash: bool = True) -> dict:
     """Пересобрать производные из манифеста.
 
@@ -388,6 +484,9 @@ def _sync(export: Path, rehash: bool = True) -> dict:
     (export / "summaries" / "redactions.md").write_text(
         render_redactions(manifest), encoding="utf-8"
     )
+    (export / "summaries" / "project-state.md").write_text(
+        render_project_state(manifest), encoding="utf-8"
+    )
     return {"items": len(manifest["items"]), "resolved": updated}
 
 
@@ -405,7 +504,8 @@ def main() -> int:
         print(f"ошибка: {exc}", file=sys.stderr)
         return 1
 
-    print(f"пересобрано: INDEX.md, summaries/redactions.md ({result['items']} записей)")
+    print(f"пересобрано: INDEX.md, summaries/redactions.md, "
+          f"summaries/project-state.md ({result['items']} записей)")
     if result["resolved"]:
         print(f"доложено файлов: {result['resolved']} — записи переведены в present")
     return 0
