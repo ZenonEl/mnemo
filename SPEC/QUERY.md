@@ -37,14 +37,28 @@ mnemo_audit.py --export <dir> --json --open-only
   "query_contract": "3",
   "mnemo_spec": "1.5",
   "export": { "slug": "priyomka", "title": "Приёмка проекта" },
+  "capabilities": ["packages", "decisions", "facts", "reviews", "audiences", "sync"],
   "requirements": [ … ],
-  "questions": [ … ]
+  "questions": [ … ],
+  "packages": [ … ],
+  "decisions": [ … ],
+  "facts": [ … ],
+  "reviews": [ … ],
+  "audiences": [ … ],
+  "sync": { … }
 }
 ```
 
 `export.slug` присутствует всегда: без него потребитель не соберёт
 `ctx:<slug>#<id>` и полезет за ним в манифест — ровно то, от чего контракт
 избавляет.
+
+`query_contract` остаётся `3`: requirements и questions совместимы байт-в-байт,
+а новые необязательные верхнеуровневые разделы обнаруживаются по
+`capabilities`. `packages` отдаёт покрытие, `reviews` — материальность и статус
+по аудиториям, `audiences` — их настройки и baseline, `facts` — `standing`,
+а `sync` — непокрытые пакеты,
+`pending_for`, изменения мимо сверок и число legacy-материалов.
 
 ## Что гарантируется
 

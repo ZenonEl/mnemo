@@ -37,7 +37,8 @@ description: "Use when the state of the work itself is in question rather than t
 
    ```
    mnemo_manifest.py req --export <dir> --batch trebovaniya.md --wanted-by <кто>
-   mnemo_manifest.py req --export <dir> --batch trebovaniya.md --wanted-by <кто> --apply
+   mnemo_manifest.py req --export <dir> --batch trebovaniya.md --wanted-by <кто> \
+     --apply --base-manifest-sha256 <hash-из-плана>
    ```
 
    Первый вызов печатает план и ничего не пишет. По требованию на строку,

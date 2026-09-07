@@ -32,6 +32,7 @@ from mnemo_core import (  # noqa: E402
     message_filename, new_item, next_id, parse_day, save_manifest, sha256_file,
     slugify, today, unknown_names,
 )
+from mnemo_reconcile import append_package  # noqa: E402
 from parsers.base import Message, ParseResult, weakest  # noqa: E402
 
 # Начало строки, которое markdown прочитает как разметку, а не как текст.
@@ -408,7 +409,8 @@ def preflight(plan: dict) -> None:
         )
 
 
-def apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: dict) -> dict:
+def apply(export: Path, source: Path, parser_obj, result: ParseResult,
+          plan: dict) -> tuple[dict, str]:
     """Внести источник в архив целиком — или не вносить вовсе.
 
     Файлы пишутся раньше, чем манифест сохраняется, и любая ошибка контракта
@@ -667,23 +669,23 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
         filed.add(rel_path)
         stats[kind] += 1
 
-    manifest.setdefault("imports", []).append({
-        "parser": parser_obj.name,
-        "source": str(source),
-        "imported": stamp,
-        "messages": len(fresh),  # noqa: E262
-        "keys": sorted({
+    package = append_package(
+        manifest, "import", created,
+        parser=parser_obj.name,
+        source=str(source),
+        imported=stamp,
+        keys=sorted({
             key
             for m in fresh
             for key in (m.key(result.source_id), m.content_key())
             if key
         }),
-    })
+    )
     save_manifest(export, manifest)
     disarm()
     # С этого мгновения откат запрещён: материал в архиве, записи о нём тоже.
     committed.append(True)
-    return stats
+    return stats, package["id"]
 
 
 def trash(path: Path) -> str:
@@ -784,11 +786,12 @@ def main() -> int:
 
             print("\n--- импорт ---")
             preflight(plan)
-            stats = apply(export, source, parser_obj, result, plan)
+            stats, package_id = apply(export, source, parser_obj, result, plan)
         from mnemo_render import sync
         sync(export)
         for key, count in sorted(stats.items()):
             print(f"  {key}: {count}")
+        print(f"  пакет: {package_id} — выполни reconcile/review для сверки с проектом")
 
         from mnemo_verify import check
         report = check(export)

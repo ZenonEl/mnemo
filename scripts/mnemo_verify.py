@@ -23,12 +23,16 @@ from mnemo_core import (  # noqa: E402
     REQUIREMENT_STATES,
     SOURCES, STATUSES, MnemoError, all_tracked_paths, find_export, iter_raw_files,
     load_manifest, parse_day, question_state, raised_marks, rel, required_spec,
-    sha256_file,
+    resolve_person, sha256_file,
     supersede_cycles, unknown_names,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_manifest import git_status, is_git_ignored  # noqa: E402
+from mnemo_reconcile import (  # noqa: E402
+    IMPACT_KINDS, is_vague, new_decision, new_fact, packages_contract,
+    review_contract, review_number, sync_contract, validate_feedback_contract, validate_graph,
+)
 
 # Ссылки вида [текст](путь) — только относительные и локальные.
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
@@ -130,10 +134,12 @@ def check(export: Path) -> Report:
             report.error("V07", f"нет обязательного файла {required}")
 
     # V08 — производное не отстало от источника
-    index_path, manifest_path = export / INDEX_NAME, export / MANIFEST_NAME
-    if index_path.is_file() and manifest_path.is_file():
-        if index_path.stat().st_mtime < manifest_path.stat().st_mtime:
-            report.warn("V08", "INDEX.md старше MANIFEST.json — выполни /mnemo:sync")
+    manifest_path = export / MANIFEST_NAME
+    for derived in (export / INDEX_NAME, export / "summaries" / "project-state.md"):
+        if derived.is_file() and manifest_path.is_file():
+            if derived.stat().st_mtime < manifest_path.stat().st_mtime:
+                report.warn("V08", f"{rel(export, derived)} старше MANIFEST.json — "
+                            "выполни /mnemo:sync")
 
     # V09 — ссылки на изъятия существуют
     for record in (items + manifest.get("requirements", []) + manifest.get("questions", [])):
@@ -377,6 +383,152 @@ def check(export: Path) -> Report:
             "любая запись через инструмент поднимет версию",
         )
 
+    audience_names: set[str] = set()
+    latest_review = max(
+        [review_number(review.get("id")) for review in manifest.get("reviews", [])] or [0]
+    )
+    for audience in manifest.get("export", {}).get("audiences", []) or []:
+        name = str(audience.get("name") or "").strip()
+        if not name or name in audience_names:
+            report.error("V24", "аудитория без имени или с повторённым именем", name)
+        audience_names.add(name)
+        if audience.get("kind") not in ("business", "technical"):
+            report.error("V24", "неизвестный kind аудитории", name)
+        people = audience.get("people")
+        if not isinstance(people, list) or not people or any(
+                resolve_person(manifest, str(person)) is None for person in people):
+            report.error("V24", "audience.people должен содержать id реестра", name)
+        baseline = review_number(audience.get("since_s"), -1)
+        if baseline < 1 or baseline > latest_review + 1:
+            report.error(
+                "V24", "since_s аудитории не указывает на существующую или следующую сверку", name
+            )
+
+    # V21 / V22 / V25 — операционные хвосты. Они видны агрегатом и не делают
+    # архив повреждённым даже в --strict: это работа, а не нарушение формата.
+    packages = packages_contract(manifest)
+    reviews = [review_contract(manifest, review) for review in manifest.get("reviews", [])]
+    sync_state = sync_contract(manifest, packages, reviews)
+    uncovered = [p for p in packages if not p.get("covered")]
+    if uncovered:
+        oldest = uncovered[0]
+        report.warn("V21", f"не покрыто пакетов: {len(uncovered)}; "
+                    f"старший {oldest['id']} ({len(oldest['uncovered_items'])} материалов)")
+    for audience, review_ids in sync_state["pending_for"].items():
+        if review_ids:
+            report.warn("V22", f"pending для {audience}: {len(review_ids)} сверок; "
+                        f"старшая {review_ids[0]}")
+    if sync_state["unreviewed_changes"]:
+        report.warn("V25", f"изменений мимо сверки: {len(sync_state['unreviewed_changes'])}; "
+                    "записи: " + ", ".join(sync_state["unreviewed_records"]))
+
+    # V23 / V26 — контракты d/f и единый DAG происхождения/замены.
+    for record in manifest.get("decisions", []):
+        try:
+            new_decision(manifest, **record)
+        except MnemoError as exc:
+            report.error("V23", str(exc), record.get("id", "?"))
+    for record in manifest.get("facts", []):
+        try:
+            new_fact(manifest, **record)
+        except MnemoError as exc:
+            report.error("V23", str(exc), record.get("id", "?"))
+    try:
+        new_graph_records = {r.get("id") for bucket in ("decisions", "facts")
+                             for r in manifest.get(bucket, [])}
+        new_graph_records.update(
+            change.get("record") for review in manifest.get("reviews", [])
+            for change in review.get("changes", [])
+        )
+        validate_graph(manifest, new_graph_records)
+    except MnemoError as exc:
+        report.error("V26", str(exc))
+
+    # V24 — замороженная сверка проверяема без повторного применения плана.
+    package_map = {p["id"]: p for p in packages}
+    record_map = {r.get("id"): r for bucket in ("requirements", "questions", "decisions", "facts")
+                  for r in manifest.get(bucket, [])}
+    known_records = set(record_map)
+    review_ids: set[str] = set()
+    for review in manifest.get("reviews", []):
+        rid = review.get("id", "?")
+        if not re.fullmatch(r"s\d{3,}", str(rid)) or rid in review_ids:
+            report.error("V24", "id сверки неверен или повторён", str(rid))
+        review_ids.add(rid)
+        try:
+            parse_day(str(review.get("date") or ""))
+        except MnemoError as exc:
+            report.error("V24", str(exc), str(rid))
+        if not str(review.get("by") or "").strip():
+            report.error("V24", "сверка без by", str(rid))
+        scope = review.get("scope") or []
+        if (not scope or len(scope) != len(set(scope))
+                or any(package_id not in package_map for package_id in scope)):
+            report.error("V24", "scope пуст или содержит неизвестный пакет", rid)
+            continue
+        retired_items = {record.get("id") for record in manifest.get("retired", [])}
+        scoped = {item_id for package_id in scope
+                  for item_id in package_map[package_id].get("items") or []
+                  if item_id not in retired_items}
+        changed = set()
+        for change in review.get("changes") or []:
+            source_items = set(change.get("source_items") or [])
+            changed.update(source_items)
+            if not source_items or not source_items <= scoped:
+                report.error("V24", "change без source_items или вне scope", rid)
+            if change.get("record") not in known_records:
+                report.error("V24", f"change ведёт в неизвестную запись {change.get('record')}", rid)
+            delta = change.get("delta") or []
+            if not delta or any("before" not in d or "after" not in d for d in delta):
+                report.error("V24", "change без полной delta before/after", rid)
+            action = change.get("action")
+            if action not in ("created", "superseded", "answered", "confirmed", "updated"):
+                report.error("V24", f"неизвестный action {action!r}", rid)
+            fields = [entry.get("field") for entry in delta]
+            if len(fields) != len(set(fields)):
+                report.error("V24", "delta повторяет одно поле", rid)
+            record_id = change.get("record")
+            if action == "created" and not any(
+                    entry.get("field") == "id" and entry.get("before") is None
+                    and entry.get("after") == record_id for entry in delta):
+                report.error("V24", "created не соответствует delta", rid)
+            if action == "superseded" and not any(
+                    record.get("supersedes") == record_id for record in record_map.values()):
+                report.error("V24", "superseded не подтверждён заменяющей записью", rid)
+            if action == "answered" and not any(
+                    entry.get("field") == "answered_by" and entry.get("after")
+                    for entry in delta):
+                report.error("V24", "answered не соответствует delta", rid)
+            if action == "confirmed" and not any(
+                    entry.get("field") == "based_on" and entry.get("after")
+                    for entry in delta):
+                report.error("V24", "confirmed не соответствует delta", rid)
+        nonmaterial = set()
+        for group in review.get("nonmaterial") or []:
+            nonmaterial.update(group.get("items") or [])
+            if is_vague(group.get("reason")):
+                report.error("V24", "nonmaterial без содержательной причины", rid)
+        if changed & nonmaterial:
+            report.error("V24", "материал одновременно change и nonmaterial", rid)
+        if (changed | nonmaterial) != scoped:
+            report.error("V24", "scope покрыт не полностью или захвачен чужой материал", rid)
+        impact_numbers: set[int] = set()
+        for impact in review.get("impacts") or []:
+            number = impact.get("n")
+            if not isinstance(number, int) or number < 1 or number in impact_numbers:
+                report.error("V24", "impact.n повторён или недопустим", rid)
+            else:
+                impact_numbers.add(number)
+            if impact.get("kind") not in IMPACT_KINDS or is_vague(impact.get("text")):
+                report.error("V24", "impact имеет неверный kind или vague text", rid)
+            refs = list(impact.get("based_on") or []) + list(impact.get("affects") or [])
+            if not impact.get("based_on") or any(ref not in known_records for ref in refs):
+                report.error("V24", "impact имеет пустую или неизвестную ссылку", rid)
+        try:
+            validate_feedback_contract(manifest, review)
+        except MnemoError as exc:
+            report.error("V24", str(exc), rid)
+
     # V17 — на один файл ровно одна запись. Две записи на один путь означают,
     # что материалов в архиве меньше, чем он показывает: содержимое одного
     # было затёрто другим, а `rehash` сделал бы это расхождение невидимым.
@@ -450,6 +602,8 @@ def main() -> int:
             ensure_ascii=False, indent=2,
         ))
     else:
+        strict_warnings = [w for w in report.warnings
+                           if w["code"] not in {"V21", "V22", "V25"}]
         for entry in report.errors:
             where = f" [{entry['where']}]" if entry["where"] else ""
             print(f"ОШИБКА {entry['code']}{where}: {entry['message']}")
@@ -458,7 +612,7 @@ def main() -> int:
             print(f"предупр. {entry['code']}{where}: {entry['message']}")
         if report.ok and not report.warnings:
             print(f"✅ {export.name}: стандарт соблюдён")
-        elif report.ok and args.strict:
+        elif report.ok and args.strict and strict_warnings:
             # В строгом режиме предупреждение — повод для ненулевого кода, и
             # значок обязан это отражать: раньше печаталось «✅», а возвращалась
             # единица, то есть вывод противоречил коду выхода.
@@ -472,7 +626,8 @@ def main() -> int:
 
     if not report.ok:
         return 1
-    return 1 if (args.strict and report.warnings) else 0
+    strict_warnings = [w for w in report.warnings if w["code"] not in {"V21", "V22", "V25"}]
+    return 1 if (args.strict and strict_warnings) else 0
 
 
 if __name__ == "__main__":

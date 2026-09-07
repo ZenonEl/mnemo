@@ -24,7 +24,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.16"
+SPEC_VERSION = "1.17"
 SPEC_MAJOR = 1
 
 # Предел на слаг в имени файла. Имя складывается из даты, слага и имени
@@ -50,6 +50,7 @@ ATTRIBUTIONS = ("reliable", "forwarder-shown", "unknown")
 PERSON_ROLES = ("self", "colleague", "management", "client", "other")
 # Состояние требования — суждение, которое делаем мы, поэтому пишется явно.
 REQUIREMENT_STATES = ("stated", "accepted", "done", "verified", "dropped")
+FACETS = ("goal", "stage", "scope", "product")
 REDACTION_REASONS = ("pii", "off-topic", "leaked-internal", "client-confidential")
 
 # Зона RAW по виду материала. Ключи — то, чем оперируют команды add-*.
@@ -347,6 +348,9 @@ def empty_manifest(slug: str, title: str, project: str | None = None,
         "retired": [],
         "requirements": [],
         "questions": [],
+        "reviews": [],
+        "decisions": [],
+        "facts": [],
     }
 
 
@@ -359,6 +363,9 @@ SECTION_SINCE = (
     ("retired", "1.5"),
     ("requirements", "1.7"),
     ("questions", "1.7"),
+    ("reviews", "1.17"),
+    ("decisions", "1.17"),
+    ("facts", "1.17"),
 )
 
 # Поле записи → версия стандарта, в которой оно появилось. Карта по РОДАМ, а не
@@ -371,6 +378,7 @@ SECTION_SINCE = (
 # так что дыра в ней выключает оба механизма разом.
 FIELD_SINCE = {
     "items": (("attribution", "1.1"),),
+    "imports": (("id", "1.17"), ("kind", "1.17"), ("items", "1.17")),
     "requirements": (
         ("tried", "1.16"), ("returned", "1.16"), ("dead_end", "1.16"),
     ),
@@ -399,6 +407,8 @@ def required_spec(manifest: dict) -> str:
     for section, since in SECTION_SINCE:
         if manifest.get(section):
             need = max(need, _ver(since))
+    if manifest.get("export", {}).get("audiences"):
+        need = max(need, _ver("1.17"))
     for bucket, fields in FIELD_SINCE.items():
         records = manifest.get(bucket) or []
         for field, since in fields:
@@ -433,6 +443,9 @@ def load_manifest(export: Path) -> dict:
     data.setdefault("retired", [])
     data.setdefault("requirements", [])
     data.setdefault("questions", [])
+    data.setdefault("reviews", [])
+    data.setdefault("decisions", [])
+    data.setdefault("facts", [])
     return data
 
 
@@ -469,6 +482,10 @@ def next_id(manifest: dict, kind: str = "item") -> str:
         "redaction": ("r", "redactions"),
         "requirement": ("t", "requirements"),
         "question": ("q", "questions"),
+        "package": ("p", "imports"),
+        "review": ("s", "reviews"),
+        "decision": ("d", "decisions"),
+        "fact": ("f", "facts"),
     }[kind]
     used = 0
     # Отставленные идентификаторы учитываются наравне с живыми: §5 требует, что

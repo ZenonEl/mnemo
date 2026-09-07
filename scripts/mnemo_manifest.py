@@ -23,7 +23,9 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -39,6 +41,12 @@ from mnemo_core import (  # noqa: E402
     new_redaction, new_requirement,
     export_lock, next_id, question_state, similar_records,
     parse_day, rel, resolve_person, save_manifest, sha256_file, slugify, today,
+)
+from mnemo_reconcile import (  # noqa: E402
+    add_feedback, append_package, apply_review_plan, csv_values,
+    deliver_feedback, file_sha256, find_review, guard_packaged_lifecycle,
+    new_decision, new_fact, next_review_id, review_material,
+    suggested_feedback_form, validate_graph,
 )
 
 EXTRACTABLE = {".docx", ".xlsx"}
@@ -484,9 +492,11 @@ def cmd_add_file(args) -> int:
         **meta,
     )
     manifest["items"].append(item)
+    package = append_package(manifest, "add-file", [item["id"]], source=item["source"])
     save_manifest(export, manifest)
 
     print(f"{item['id']}  {item['raw_path']}  [{item['fidelity']}]")
+    print(f"пакет: {package['id']} — выполни reconcile/review для сверки с проектом")
     for path in derived:
         print(f"        → {path}")
     return 0
@@ -529,8 +539,10 @@ def cmd_add_text(args) -> int:
         **meta,
     )
     manifest["items"].append(item)
+    package = append_package(manifest, "add-text", [item["id"]], source=item["source"])
     save_manifest(export, manifest)
     print(f"{item['id']}  {item['raw_path']}  [{item['fidelity']}]")
+    print(f"пакет: {package['id']} — выполни reconcile/review для сверки с проектом")
     return 0
 
 
@@ -1112,8 +1124,15 @@ def cmd_req(args) -> int:
         report_similar_batch(fresh, manifest["requirements"], "quote",
                              args.anyway, "требование")
         if not args.apply:
+            print(f"\nbase_manifest_sha256: {file_sha256(export)}")
             print("\n— это план. Ничего не изменено. Повтори с --apply.")
             return 0
+        actual_hash = file_sha256(export)
+        if args.base_manifest_sha256 != actual_hash:
+            raise MnemoError(
+                "состояние изменилось после плана; повтори dry-run и используй "
+                "hash из нового плана"
+            )
         if not fresh:
             print("\nНовых требований нет — манифест не тронут.")
             return 0
@@ -1130,6 +1149,7 @@ def cmd_req(args) -> int:
             manifest["requirements"].append(record)
             print(f"{record['id']}  {record['state']}  {record['quote'][:56]}")
             announce_escalation(record)
+        validate_graph(manifest)
         save_manifest(export, manifest)
         return 0
 
@@ -1137,6 +1157,10 @@ def cmd_req(args) -> int:
         record = next((r for r in manifest["requirements"] if r["id"] == args.id), None)
         if record is None:
             raise MnemoError(f"нет требования {args.id}")
+        guard_packaged_lifecycle(
+            manifest,
+            csv_values(args.based_on) + [args.evidence or ""],
+        )
         # Обновляем всё, что человек передал. Раньше цикл читал только часть
         # полей, и `--quote` при исправлении опечатки молча терялся: команда
         # отвечала успехом, а в манифесте оставалась старая формулировка.
@@ -1163,6 +1187,7 @@ def cmd_req(args) -> int:
         said = apply_pass_outcome(record, args.pass_outcome, args.returned) \
             if args.pass_outcome else []
         new_requirement(**record)  # перепроверка контракта после правки
+        validate_graph(manifest)
         save_manifest(export, manifest)
         print(f"{record['id']}  {record['state']}  {record['quote'][:56]}")
         for line in said:
@@ -1186,6 +1211,7 @@ def cmd_req(args) -> int:
         stage=args.stage, supersedes=args.supersedes, note=args.note, date=args.date,
     )
     manifest["requirements"].append(record)
+    validate_graph(manifest)
     save_manifest(export, manifest)
     print(f"{record['id']}  {record['state']}  {record['quote'][:56]}")
     announce_escalation(record)
@@ -1248,12 +1274,17 @@ def cmd_ask(args) -> int:
         print("\n    mnemo_manifest.py ask --export <dir> --text \"<вопрос>\" \\")
         print("      --impact <что меняется> --asked-of <кто> --based-on ctx:<slug>#iNNN \\")
         print("      --self-attempt <чем сам пробовал закрыть>")
+        print(f"\nbase_manifest_sha256: {file_sha256(export)}")
         return 0
 
     if args.id:
         record = next((q for q in manifest["questions"] if q["id"] == args.id), None)
         if record is None:
             raise MnemoError(f"нет вопроса {args.id}")
+        guard_packaged_lifecycle(
+            manifest,
+            csv_values(args.based_on) + [args.answered_by or ""],
+        )
         if args.raised_to:
             # Отметка «спросили» — накопительная: вопрос могли поднимать дважды,
             # и это разные события, а не перезапись одного.
@@ -1275,6 +1306,7 @@ def cmd_ask(args) -> int:
         said = apply_pass_outcome(record, args.pass_outcome, args.returned) \
             if args.pass_outcome else []
         new_question(**record)  # перепроверка контракта после правки
+        validate_graph(manifest)
         save_manifest(export, manifest)
         print(f"{record['id']}  {question_state(record)}  {record['text'][:56]}")
         for line in said:
@@ -1301,6 +1333,7 @@ def cmd_ask(args) -> int:
         date=args.date,
     )
     manifest["questions"].append(record)
+    validate_graph(manifest)
     save_manifest(export, manifest)
     print(f"{record['id']}  {question_state(record)}  {record['text'][:56]}")
     announce_escalation(record)
@@ -1449,7 +1482,6 @@ def cmd_people(args) -> int:
             if handles:
                 print(f"{'':<14} {handles}")
         return 0
-
     person_id = args.id or slugify(args.display)
     if any(p["id"] == person_id for p in manifest["people"]):
         raise MnemoError(f"человек с id={person_id} уже есть; используй другой --id")
@@ -1502,6 +1534,221 @@ def cmd_whois(args) -> int:
         print(f"{args.name}: в реестре нет")
         return 1
     print(json.dumps(person, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _record_command(args, kind: str) -> int:
+    export = find_export(Path(args.export))
+    manifest = load_manifest(export)
+    bucket = "decisions" if kind == "decision" else "facts"
+    factory = new_decision if kind == "decision" else new_fact
+    if args.id:
+        record_index = next((index for index, item in enumerate(manifest[bucket])
+                             if item.get("id") == args.id), None)
+        if record_index is None:
+            raise MnemoError(f"нет записи {args.id}")
+        record = dict(manifest[bucket][record_index])
+        refs = csv_values(args.based_on)
+        guard_packaged_lifecycle(manifest, refs + [getattr(args, "verification", None) or ""])
+        fields = ("text", "decided_by", "reason", "facet", "area", "supersedes",
+                  "date", "note") if kind == "decision" else (
+                      "text", "stated_by", "verification", "verified_by", "facet",
+                      "area", "supersedes", "date", "note")
+        for field in fields:
+            value = getattr(args, field, None)
+            if value is not None:
+                record[field] = value
+        if args.based_on:
+            record["based_on"] = refs
+        record = factory(manifest, **record)
+        manifest[bucket][record_index] = record
+    else:
+        raw = {key: value for key, value in vars(args).items()
+               if key not in {"command", "func", "export", "id"} and value is not None}
+        raw["based_on"] = csv_values(args.based_on)
+        raw["id"] = next_id(manifest, kind)
+        record = factory(manifest, **raw)
+        manifest[bucket].append(record)
+    validate_graph(manifest)
+    save_manifest(export, manifest)
+    standing = "" if kind == "decision" else (
+        "  verified" if record.get("verification") else "  claim"
+    )
+    print(f"{record['id']}  {record['facet']}{standing}  {record['text'][:56]}")
+    return 0
+
+
+def cmd_decide(args) -> int:
+    return _record_command(args, "decision")
+
+
+def cmd_fact(args) -> int:
+    return _record_command(args, "fact")
+
+
+def cmd_audiences(args) -> int:
+    """Настроить, кому проект обязан понятной синхронизацией."""
+    export = find_export(Path(args.export))
+    manifest = load_manifest(export)
+    audiences = manifest.setdefault("export", {}).setdefault("audiences", [])
+    if not args.add:
+        if not audiences:
+            print("аудиторий нет")
+            return 0
+        for audience in audiences:
+            print(f"{audience['name']}  {audience['kind']}  "
+                  f"с {audience['since_s']}  {', '.join(audience['people'])}")
+        return 0
+    if not str(args.name or "").strip():
+        raise MnemoError("--add требует непустой --name")
+    if not csv_values(args.people):
+        raise MnemoError("--add требует хотя бы одного человека в --people")
+    if args.backfill_from and not re.fullmatch(r"s\d{3,}", args.backfill_from):
+        raise MnemoError("--backfill-from должен иметь вид sNNN")
+    if args.backfill_from and not any(
+            review.get("id") == args.backfill_from for review in manifest.get("reviews", [])):
+        raise MnemoError(f"нет сверки {args.backfill_from} для backfill")
+    if any(a.get("name") == args.name for a in audiences):
+        raise MnemoError(f"аудитория «{args.name}» уже есть")
+
+    people: list[str] = []
+    missing: list[str] = []
+    for name in csv_values(args.people):
+        person = resolve_person(manifest, name)
+        if person is None:
+            missing.append(name)
+        elif person["id"] not in people:
+            people.append(person["id"])
+    if missing:
+        confirmed = args.confirm_create_people
+        if not confirmed and sys.stdin.isatty():
+            answer = input(
+                "Добавить в реестр как management: " + ", ".join(missing) + "? [y/N] "
+            ).strip().casefold()
+            confirmed = answer in ("y", "yes", "д", "да")
+        if not confirmed:
+            raise MnemoError(
+                "имён нет в реестре: " + ", ".join(missing) + ". Повтори тот же "
+                "вызов с --confirm-create-people, чтобы добавить их как management"
+            )
+        for display in missing:
+            person_id = slugify(display)
+            base, suffix = person_id, 2
+            while any(p.get("id") == person_id for p in manifest.get("people", [])):
+                person_id = f"{base}-{suffix}"
+                suffix += 1
+            person = new_person(id=person_id, display=display, role="management")
+            manifest["people"].append(person)
+            people.append(person_id)
+
+    audience = {
+        "name": args.name, "kind": args.kind, "people": people,
+        "since_s": args.backfill_from or next_review_id(manifest),
+    }
+    audiences.append(audience)
+    save_manifest(export, manifest)
+    print(f"{audience['name']}  с {audience['since_s']}  {', '.join(people)}")
+    return 0
+
+
+def _read_json_object(path: str) -> dict:
+    try:
+        value = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MnemoError(f"не удалось прочитать JSON-план {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise MnemoError("JSON-план должен быть объектом")
+    return value
+
+
+def cmd_review(args) -> int:
+    export = find_export(Path(args.export))
+    manifest = load_manifest(export)
+    plan = _read_json_object(args.plan_file)
+    expected = str(plan.get("base_manifest_sha256") or "")
+    actual = file_sha256(export)
+    if expected != actual:
+        raise MnemoError(
+            "состояние изменилось после плана; построй сверку заново "
+            f"(ожидался {expected or 'пустой hash'}, сейчас {actual})"
+        )
+    if not args.apply:
+        staged = copy.deepcopy(manifest)
+        review = apply_review_plan(staged, copy.deepcopy(plan))
+        retired = {record.get("id") for record in staged.get("retired", [])}
+        scoped_items = {
+            item_id
+            for package in staged.get("imports", []) if package.get("id") in review["scope"]
+            for item_id in package.get("items") or [] if item_id not in retired
+        }
+        already_reviewed = sorted({
+            previous.get("id")
+            for previous in manifest.get("reviews", [])
+            if set(previous.get("scope") or []) & set(review["scope"])
+        })
+        preview = {
+            "validated": True,
+            "base_manifest_sha256": actual,
+            "review": review,
+            "coverage": {"covered": len(scoped_items), "total": len(scoped_items)},
+            "material": review_material(staged, review),
+            "suggested_feedback_form": suggested_feedback_form(staged, review),
+            "warnings": (["пакеты scope уже разбирались в " + ", ".join(already_reviewed)]
+                         if already_reviewed else []),
+        }
+        print(json.dumps(preview, ensure_ascii=False, indent=2))
+        print("\n— план проверен, MANIFEST.json не изменён. "
+              "После подтверждения повтори с --apply.")
+        return 0
+    review = apply_review_plan(manifest, plan)
+    save_manifest(export, manifest)
+    print(f"{review['id']}  пакетов: {len(review['scope'])}  "
+          f"изменений: {len(review['changes'])}")
+    return 0
+
+
+def cmd_feedback(args) -> int:
+    export = find_export(Path(args.export))
+    manifest = load_manifest(export)
+    review = find_review(manifest, args.review)
+    if not any(a.get("name") == args.audience
+               for a in manifest.get("export", {}).get("audiences", [])):
+        raise MnemoError(f"неизвестная аудитория «{args.audience}»")
+    text = None
+    if args.text_file:
+        try:
+            text = Path(args.text_file).expanduser().read_text(encoding="utf-8")
+        except OSError as exc:
+            raise MnemoError(
+                f"не удалось прочитать текст обратной связи {args.text_file}: {exc}"
+            ) from exc
+    feedback = add_feedback(
+        manifest, review, audience=args.audience, needed=args.needed, form=args.form,
+        text=text, reason=args.reason,
+        includes_records=csv_values(args.includes_records),
+        includes_impacts=csv_values(args.includes_impacts),
+        selected_question=args.selected_question,
+        supersedes_n=args.supersedes_n, resend=args.resend,
+    )
+    save_manifest(export, manifest)
+    print(f"{args.review} feedback {feedback['n']}  {args.audience}  "
+          f"{feedback['form'] or 'not-needed'}")
+    return 0
+
+
+def cmd_deliver(args) -> int:
+    export = find_export(Path(args.export))
+    manifest = load_manifest(export)
+    review = find_review(manifest, args.review)
+    _, created = deliver_feedback(
+        manifest, review, args.feedback, where=args.where, ref=args.ref,
+        resend=args.resend, reason=args.reason,
+    )
+    if created:
+        save_manifest(export, manifest)
+        print(f"{args.review} feedback {args.feedback}  доставлено: {args.where} {args.ref}")
+    else:
+        print(f"{args.review} feedback {args.feedback}  уже записано: {args.where} {args.ref}")
     return 0
 
 
@@ -1604,6 +1851,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="файл со списком: по записи на строку, необязательный хвост после `::` — ссылки based_on")
     p_req.add_argument("--apply", action="store_true",
                     help="выполнить пакет (иначе только план)")
+    p_req.add_argument("--base-manifest-sha256", default=None,
+                       help="hash MANIFEST.json из dry-run; обязателен для batch --apply")
     p_req.set_defaults(func=cmd_req)
 
     p_ask = sub.add_parser("ask", help="открытый вопрос")
@@ -1675,6 +1924,86 @@ def build_parser() -> argparse.ArgumentParser:
     p_who.add_argument("name")
     p_who.set_defaults(func=cmd_whois)
 
+    p_decide = sub.add_parser("decide", help="зафиксировать принятое решение")
+    p_decide.add_argument("--export", default=".")
+    p_decide.add_argument("--id")
+    p_decide.add_argument("--text")
+    p_decide.add_argument("--decided-by", dest="decided_by")
+    p_decide.add_argument("--reason")
+    p_decide.add_argument("--based-on", dest="based_on", default="")
+    p_decide.add_argument("--facet", choices=("goal", "stage", "scope", "product"))
+    p_decide.add_argument("--area")
+    p_decide.add_argument("--supersedes")
+    p_decide.add_argument("--date")
+    p_decide.add_argument("--note")
+    p_decide.set_defaults(func=cmd_decide)
+
+    p_fact = sub.add_parser("fact", help="зафиксировать утверждение и его проверку")
+    p_fact.add_argument("--export", default=".")
+    p_fact.add_argument("--id")
+    p_fact.add_argument("--text")
+    p_fact.add_argument("--stated-by", dest="stated_by")
+    p_fact.add_argument("--based-on", dest="based_on", default="")
+    p_fact.add_argument("--verification")
+    p_fact.add_argument("--verified-by", dest="verified_by")
+    p_fact.add_argument("--facet", choices=("goal", "stage", "scope", "product"))
+    p_fact.add_argument("--area")
+    p_fact.add_argument("--supersedes")
+    p_fact.add_argument("--date")
+    p_fact.add_argument("--note")
+    p_fact.set_defaults(func=cmd_fact)
+
+    p_aud = sub.add_parser("audiences", help="кому проект обязан синхронизацией")
+    p_aud.add_argument("--export", default=".")
+    p_aud.add_argument("--add", action="store_true")
+    p_aud.add_argument("--name", default=None)
+    p_aud.add_argument("--kind", choices=("business", "technical"), default="business")
+    p_aud.add_argument("--people", default="", help="имена, id или алиасы через запятую")
+    p_aud.add_argument("--backfill-from", default=None, metavar="S_ID")
+    p_aud.add_argument("--confirm-create-people", action="store_true",
+                       help="явно добавить неизвестные имена как management")
+    p_aud.set_defaults(func=cmd_audiences)
+
+    p_review = sub.add_parser(
+        "review", help="проверить или применить JSON-план сверки",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""План: {base_manifest_sha256, by, scope, creates, mutations,
+nonmaterial, impacts}. creates содержит {kind, source_items, record}; mutations —
+{record, field, value, source_items}. Полная схема и пример: SPEC/STANDARD.md §6в.
+Без --apply план полностью валидируется на копии и MANIFEST.json не меняется.""",
+    )
+    p_review.add_argument("--export", default=".")
+    p_review.add_argument("--plan-file", required=True)
+    p_review.add_argument("--apply", action="store_true")
+    p_review.set_defaults(func=cmd_review)
+
+    p_feedback = sub.add_parser("feedback", help="зафиксировать редакцию сообщения аудитории")
+    p_feedback.add_argument("--export", default=".")
+    p_feedback.add_argument("review")
+    p_feedback.add_argument("--audience", required=True)
+    need = p_feedback.add_mutually_exclusive_group(required=True)
+    need.add_argument("--needed", dest="needed", action="store_true")
+    need.add_argument("--not-needed", dest="needed", action="store_false")
+    p_feedback.add_argument("--form", choices=("confirmation", "clarification"))
+    p_feedback.add_argument("--text-file")
+    p_feedback.add_argument("--reason")
+    p_feedback.add_argument("--includes-records", default="")
+    p_feedback.add_argument("--includes-impacts", default="")
+    p_feedback.add_argument("--selected-question")
+    p_feedback.add_argument("--supersedes-n", type=int)
+    p_feedback.add_argument("--resend", action="store_true")
+    p_feedback.set_defaults(func=cmd_feedback)
+
+    p_deliver = sub.add_parser("deliver", help="отметить фактическую доставку feedback")
+    p_deliver.add_argument("--export", default=".")
+    p_deliver.add_argument("review")
+    p_deliver.add_argument("--feedback", type=int, required=True)
+    p_deliver.add_argument("--where", required=True)
+    p_deliver.add_argument("--ref", required=True)
+    p_deliver.add_argument("--resend", action="store_true")
+    p_deliver.add_argument("--reason")
+    p_deliver.set_defaults(func=cmd_deliver)
+
     p_show = sub.add_parser(
         "show", help="показать манифест — отладочный просмотр, не контракт "
                      "чтения; для интеграции см. audit --json и SPEC/QUERY.md")
@@ -1691,7 +2020,8 @@ def build_parser() -> argparse.ArgumentParser:
 # `save_manifest`: он отказывается писать без замка. Забытая команда падает с
 # объяснением, а не тихо теряет чужие изменения.
 MUTATING = {"remove", "add-file", "add-text", "add-gap", "redact", "rehash",
-            "req", "ask", "people"}
+            "req", "ask", "people", "decide", "fact", "audiences", "review",
+            "feedback", "deliver"}
 
 
 def main() -> int:

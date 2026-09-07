@@ -14,8 +14,9 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/mnemo_manifest.py req --export <dir> \
 
 **Завести пачкой** — когда из ТЗ снимается два десятка требований разом:
 ```
-... req --export <dir> --batch trebovaniya.md --wanted-by "<кто>"          # план
-... req --export <dir> --batch trebovaniya.md --wanted-by "<кто>" --apply  # запись
+... req --export <dir> --batch trebovaniya.md --wanted-by "<кто>"          # план + hash
+... req --export <dir> --batch trebovaniya.md --wanted-by "<кто>" --apply \
+  --base-manifest-sha256 <hash-из-плана>                                  # запись
 ```
 Файл — по требованию на строку; необязательный хвост после `::` задаёт ссылки
 `based_on` для этой строки. Общие поля берутся из флагов один раз. Совпадающие

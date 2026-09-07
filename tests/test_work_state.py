@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -54,6 +55,9 @@ class ExportCase(unittest.TestCase):
     def manifest(self) -> dict:
         return json.loads((self.export / "MANIFEST.json").read_text(encoding="utf-8"))
 
+    def manifest_hash(self) -> str:
+        return hashlib.sha256((self.export / "MANIFEST.json").read_bytes()).hexdigest()
+
     def audit(self, *args: str) -> subprocess.CompletedProcess:
         return _run("mnemo_audit.py", "--export", str(self.export), *args)
 
@@ -73,6 +77,13 @@ class ExportCase(unittest.TestCase):
         return done.stdout.split()[0]
 
     def a_question(self, **flags: str) -> str:
+        if not self.manifest()["items"]:
+            gap = self.man(
+                "add-gap", "--status", "unrecoverable", "--source", "other",
+                "--fidelity", "placeholder", "--note", "оригинал недоступен",
+                "--origin", "описание вопроса",
+            )
+            self.assertEqual(gap.returncode, 0, gap.stderr)
         args = ["ask", "--text", flags.pop("text", "точно ли эта платёжка"),
                 "--impact", flags.pop("impact", "какой SDK и какие вебхуки в интеграции"),
                 "--asked-of", "petr-ivanov",
@@ -387,7 +398,7 @@ class DowngradeToAssumption(ExportCase):
         ident = self.a_question()
         self.man("ask", "--id", ident, "--assumed", "как в прошлых проектах",
                  "--cost-if-wrong", "переписать модуль оплаты, день")
-        done = self.man("ask", "--id", ident, "--answered-by", "ctx:priyomka#i004")
+        done = self.man("ask", "--id", ident, "--answered-by", "ctx:priyomka#i001")
         self.assertEqual(done.returncode, 0, done.stderr)
         row = next(q for q in self.audit_json()["questions"] if q["id"] == ident)
         self.assertEqual(row["state"], "answered")
@@ -534,7 +545,7 @@ class ReadContract(ExportCase):
     def test_the_standard_version_agrees_with_the_document(self) -> None:
         header = (ROOT / "SPEC" / "STANDARD.md").read_text(encoding="utf-8")
         self.assertIn(f"**Версия стандарта:** {SPEC_VERSION}", header)
-        self.assertEqual(SPEC_VERSION, "1.16")
+        self.assertEqual(SPEC_VERSION, "1.17")
 
 
 class SpecVersionIsRaised(ExportCase):
@@ -655,7 +666,8 @@ class BatchCannotShareAnAttempt(ExportCase):
         """Запрет не должен убивать пакет: он про попытку, не про блокировку."""
         batch = self.batch_file("нужен доступ к их API", "нужен доступ к базе")
         done = self.man("req", "--batch", batch, "--apply",
-                        "--wanted-by", "petr-ivanov", "--blocking", "работа стоит")
+                        "--wanted-by", "petr-ivanov", "--blocking", "работа стоит",
+                        "--base-manifest-sha256", self.manifest_hash())
         self.assertEqual(done.returncode, 0, done.stderr)
         blocked = [r for r in self.manifest()["requirements"] if r["blocking"]]
         self.assertEqual(len(blocked), 2)
@@ -681,4 +693,19 @@ class BatchCannotShareAnAttempt(ExportCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("нужна ли админка", done.stdout)
         self.assertIn("--self-attempt", done.stdout)
+        self.assertEqual(self.manifest()["questions"], [])
+
+    def test_requirement_batch_refuses_a_stale_plan_hash(self) -> None:
+        batch = self.batch_file("нужен доступ к их API")
+        old_hash = self.manifest_hash()
+        added = self.man("people", "--add", "--display", "Оператор",
+                         "--id", "operator", "--role", "self")
+        self.assertEqual(added.returncode, 0, added.stderr)
+        done = self.man(
+            "req", "--batch", batch, "--apply", "--wanted-by", "petr-ivanov",
+            "--base-manifest-sha256", old_hash,
+        )
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("состояние изменилось после плана", done.stderr)
+        self.assertEqual(self.manifest()["requirements"], [])
         self.assertEqual(self.manifest()["questions"], [])

@@ -166,11 +166,11 @@ python3 "$MNEMO/scripts/mnemo_verify.py" --help
 
 | Скрипт | Назначение |
 |---|---|
-| `mnemo_manifest.py` | `init`, `add-file`, `add-text`, `add-gap`, `redact`, `remove`, `req`, `ask`, `people`, `whois`, `rehash`, `show` |
+| `mnemo_manifest.py` | `init`, `add-file`, `add-text`, `add-gap`, `redact`, `remove`, `req`, `ask`, `people`, `whois`, `decide`, `fact`, `audiences`, `review`, `feedback`, `deliver`, `rehash`, `show` |
 | `mnemo_import.py` | импорт источника целиком; формат определяется реестром парсеров |
 | `mnemo_extract.py` | текст и вшитые картинки из `.docx` / `.xlsx` |
 | `mnemo_render.py` | пересборка `INDEX.md` и `summaries/redactions.md` |
-| `mnemo_verify.py` | линтер V01–V20 |
+| `mnemo_verify.py` | линтер V01–V26 |
 | `mnemo_selfcheck.py` | согласованность самого плагина: версии, правила, префиксы |
 | `mnemo_audit.py` | сводка «всё ли сделано как хотели» |
 | `mnemo_publish.py` | публичный срез: детерминированный отбор по контуру |
@@ -445,8 +445,9 @@ mnemo_audit.py                     # ответ: всё ли сделано ка
 двадцать вызовов с одинаковыми хвостами — это то, на чём начинают срезать углы:
 
 ```
-mnemo_manifest.py req --batch trebovaniya.md --wanted-by petr-ivanov          # план
-mnemo_manifest.py req --batch trebovaniya.md --wanted-by petr-ivanov --apply  # запись
+mnemo_manifest.py req --batch trebovaniya.md --wanted-by petr-ivanov          # план + hash
+mnemo_manifest.py req --batch trebovaniya.md --wanted-by petr-ivanov --apply \
+  --base-manifest-sha256 <hash-из-плана>                                      # запись
 ```
 
 По записи на строку, хвост после `::` — ссылки `based_on` для этой строки.
