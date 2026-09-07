@@ -2,3 +2,5 @@ interface:
   display_name: "Mnemo — сверка проекта"
   short_description: "Сопоставить новый пакет с состоянием проекта"
   default_prompt: "Use $mnemo:reconcile to compare this new message batch with the current project state and prepare the right manager feedback."
+policy:
+  allow_implicit_invocation: true

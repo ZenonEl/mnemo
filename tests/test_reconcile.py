@@ -741,6 +741,16 @@ class DecisionsAndFacts(ReconcileCase):
 
 
 class ReadAndProjection(ReconcileCase):
+    def test_reconcile_is_implicit_for_codex_and_has_claude_commands(self) -> None:
+        metadata = (ROOT / "skills" / "reconcile" / "agents" / "openai.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("allow_implicit_invocation: true", metadata)
+        for name in ("review", "feedback", "deliver", "decide", "fact", "audiences"):
+            command = ROOT / "commands" / f"{name}.md"
+            self.assertTrue(command.is_file(), name)
+            self.assertIn("mnemo:reconcile", command.read_text(encoding="utf-8"))
+
     def test_query_contract_stays_three_and_declares_capabilities(self) -> None:
         data = json.loads(run("mnemo_audit.py", "--export", str(self.export), "--json").stdout)
         self.assertEqual(data["query_contract"], "3")
@@ -766,6 +776,18 @@ class ReadAndProjection(ReconcileCase):
         self.assertIn(uncovered_package, shown.stdout)
         self.assertIn("МАТЕРИАЛЬНОЕ БЕЗ ДОСТАВКИ", shown.stdout)
         self.assertIn("СИНХРОНИЗАЦИЯ ПО АУДИТОРИЯМ", shown.stdout)
+
+    def test_human_audit_names_material_before_packages(self) -> None:
+        added = self.man(
+            "add-gap", "--status", "unrecoverable", "--source", "other",
+            "--fidelity", "placeholder", "--origin", "архив до пакетного учёта",
+            "--note", "оригинал материала утрачен",
+        )
+        self.assertEqual(added.returncode, 0, added.stderr)
+        shown = run("mnemo_audit.py", "--export", str(self.export))
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("До пакетного учёта: 1 материал", shown.stdout)
+        self.assertIn("новые внесения будут пакетами", shown.stdout)
 
     def test_project_state_is_generated_without_package_chronicle(self) -> None:
         item_id, package_id = self.add_text("goal", "Цель согласована")

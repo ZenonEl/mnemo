@@ -78,6 +78,14 @@ def cut(text: str, limit: int) -> str:
     return (head or text[:limit]) + "…"
 
 
+def material_word(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return "материал"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return "материала"
+    return "материалов"
+
+
 def who(manifest: dict, ident: str | None) -> str:
     if not ident:
         return "—"
@@ -221,8 +229,12 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
     packages = packages_contract(manifest)
     reviews = [review_contract(manifest, review) for review in manifest.get("reviews", [])]
     sync = sync_contract(manifest, packages, reviews)
-    if packages or reviews:
+    if packages or reviews or sync["material_before_packages"]:
         out += ["━━━ ПАКЕТЫ И СВЕРКИ ━━━", ""]
+        if sync["material_before_packages"]:
+            legacy_count = sync["material_before_packages"]
+            out.append(f"  До пакетного учёта: {legacy_count} {material_word(legacy_count)}; "
+                       "новые внесения будут пакетами.")
         uncovered = [package for package in packages if not package.get("covered")]
         if uncovered:
             out.append(f"  НЕ РАЗОБРАНО: {len(uncovered)} пакетов — "
