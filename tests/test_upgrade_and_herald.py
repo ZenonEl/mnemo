@@ -77,6 +77,33 @@ class ReviewRegression(ReconcileCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.manifest()["reviews"][-1]["changes"][0]["action"], "updated")
 
+    def test_v24_rejects_unanswered_with_nonempty_after(self) -> None:
+        item, package = self.add_text("answer", "Оплата будет по счёту")
+        created = self.man(
+            "ask", "--text", "Как платить?", "--impact", "меняет сценарий оплаты",
+            "--self-attempt", "проверил пакет и нашёл ответ", "--asked-of", "petr-ivanov",
+            "--based-on", f"ctx:priyomka#{item}",
+            "--answered-by", f"ctx:priyomka#{item}",
+        )
+        self.assertEqual(created.returncode, 0, created.stderr)
+        path = self.export / "MANIFEST.json"
+        manifest = self.manifest()
+        manifest["reviews"].append({
+            "id": "s001", "date": "2026-09-14", "by": "operator",
+            "scope": [package], "changes": [{
+                "action": "unanswered", "record": "q001", "source_items": [item],
+                "delta": [{"field": "answered_by", "before": None,
+                           "after": f"ctx:priyomka#{item}"}], "note": None,
+            }], "nonmaterial": [], "impacts": [], "feedback": [], "note": None,
+        })
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8")
+        checked = json.loads(run(
+            "mnemo_verify.py", "--export", str(self.export), "--json",
+        ).stdout)
+        v24 = [row["message"] for row in checked["errors"] if row["code"] == "V24"]
+        self.assertIn("unanswered не соответствует delta", v24)
+
     def test_material_review_without_audience_requires_explicit_waiver(self) -> None:
         item, package = self.add_text("waiver", "Нужно выпускать отчёт")
         plan = self.plan(scope=[package], creates=[{
