@@ -170,7 +170,7 @@ python3 "$MNEMO/scripts/mnemo_verify.py" --help
 | `mnemo_import.py` | импорт источника целиком; формат определяется реестром парсеров |
 | `mnemo_extract.py` | текст и вшитые картинки из `.docx` / `.xlsx` |
 | `mnemo_render.py` | пересборка `INDEX.md` и `summaries/redactions.md` |
-| `mnemo_verify.py` | линтер V01–V26 |
+| `mnemo_verify.py` | линтер V01–V27 |
 | `mnemo_selfcheck.py` | согласованность самого плагина: версии, правила, префиксы |
 | `mnemo_audit.py` | сводка «всё ли сделано как хотели» |
 | `mnemo_publish.py` | публичный срез: детерминированный отбор по контуру |

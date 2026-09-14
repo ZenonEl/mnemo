@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import signal
@@ -669,18 +670,24 @@ def _apply(export: Path, source: Path, parser_obj, result: ParseResult, plan: di
         filed.add(rel_path)
         stats[kind] += 1
 
-    package = append_package(
-        manifest, "import", created,
-        parser=parser_obj.name,
-        source=str(source),
-        imported=stamp,
-        keys=sorted({
+    package_extra = {
+        "parser": parser_obj.name,
+        "source": str(source),
+        "imported": stamp,
+        "keys": sorted({
             key
             for m in fresh
             for key in (m.key(result.source_id), m.content_key())
             if key
         }),
-    )
+    }
+    if parser_obj.name == "herald-inbox":
+        fresh_ids = {m.msg_id for m in fresh}
+        package_extra["herald_keys"] = [
+            key for message, key in zip(result.messages, result.herald_keys)
+            if message.msg_id in fresh_ids
+        ]
+    package = append_package(manifest, "import", created, **package_extra)
     save_manifest(export, manifest)
     disarm()
     # С этого мгновения откат запрещён: материал в архиве, записи о нём тоже.
@@ -792,6 +799,15 @@ def main() -> int:
         for key, count in sorted(stats.items()):
             print(f"  {key}: {count}")
         print(f"  пакет: {package_id} — выполни reconcile/review для сверки с проектом")
+        if parser_obj.name == "herald-inbox":
+            saved = load_manifest(export)
+            slug = saved["export"]["slug"]
+            archive_ref = f"ctx:{slug}#{package_id}"
+            print(f"  адрес пакета: {archive_ref}")
+            package = next(row for row in saved["imports"] if row.get("id") == package_id)
+            keys_json = json.dumps(package.get("herald_keys") or [], ensure_ascii=False)
+            print(f"  после проверки: inbox_done(keys={keys_json}, "
+                  f"archive_ref={json.dumps(archive_ref, ensure_ascii=False)})")
 
         from mnemo_verify import check
         report = check(export)

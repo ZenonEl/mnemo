@@ -128,6 +128,11 @@ class ParseResult:
     anchor: Path | None = None
     source_id: str = ""
     notes: list[str] = field(default_factory=list)
+    # Структурированные ключи внешнего буфера, которые нужны человеку для
+    # подтверждения архивации. Сейчас их возвращает только herald-inbox.
+    # Не склеиваем пару в строку: chat_id и message_id имеют разные области
+    # уникальности и должны дойти обратно до Herald без обратного парсинга.
+    herald_keys: list[dict[str, int]] = field(default_factory=list)
 
 
 class Parser:

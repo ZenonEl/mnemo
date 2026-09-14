@@ -26,6 +26,7 @@ import argparse
 import copy
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,7 @@ from mnemo_reconcile import (  # noqa: E402
     new_decision, new_fact, next_review_id, review_material,
     suggested_feedback_form, validate_graph,
 )
+from mnemo_upgrade import apply_upgrade, build_upgrade_plan  # noqa: E402
 
 EXTRACTABLE = {".docx", ".xlsx"}
 
@@ -1686,13 +1688,22 @@ def cmd_review(args) -> int:
             for previous in manifest.get("reviews", [])
             if set(previous.get("scope") or []) & set(review["scope"])
         })
+        material = review_material(staged, review)
+        audiences = staged.get("export", {}).get("audiences", [])
         preview = {
             "validated": True,
             "base_manifest_sha256": actual,
             "review": review,
             "coverage": {"covered": len(scoped_items), "total": len(scoped_items)},
-            "material": review_material(staged, review),
+            "material": material,
             "suggested_feedback_form": suggested_feedback_form(staged, review),
+            "audience_gate": (
+                {"status": "configured", "audiences": [row.get("name") for row in audiences]}
+                if audiences else
+                {"status": "not-needed", "reason": review.get("audience_not_needed_reason")}
+                if material else
+                {"status": "not-required"}
+            ),
             "warnings": (["пакеты scope уже разбирались в " + ", ".join(already_reviewed)]
                          if already_reviewed else []),
         }
@@ -1704,6 +1715,58 @@ def cmd_review(args) -> int:
     save_manifest(export, manifest)
     print(f"{review['id']}  пакетов: {len(review['scope'])}  "
           f"изменений: {len(review['changes'])}")
+    material = review_material(manifest, review)
+    if not material:
+        print("нематериальна — feedback не требуется")
+    elif review.get("audience_not_needed_reason"):
+        print("материальна — адресная синхронизация не нужна: "
+              + review["audience_not_needed_reason"])
+    else:
+        audience_names = [row.get("name") for row in manifest["export"].get("audiences", [])]
+        print("материальна; pending: " + ", ".join(audience_names))
+        form = suggested_feedback_form(manifest, review)
+        records = ",".join(dict.fromkeys(
+            str(change.get("record")) for change in review.get("changes", [])
+            if change.get("record")
+        ))
+        impacts = ",".join(str(row.get("n")) for row in review.get("impacts", []))
+        for audience in audience_names:
+            command = (
+                "следующий шаг: mnemo_manifest.py feedback "
+                f"--export {shlex.quote(str(export))} {review['id']} "
+                f"--audience {shlex.quote(str(audience))} --needed --form {form} "
+                "--text-file <file>"
+            )
+            if records:
+                command += f" --includes-records {shlex.quote(records)}"
+            if impacts:
+                command += f" --includes-impacts {shlex.quote(impacts)}"
+            print(command)
+    return 0
+
+
+def cmd_upgrade(args) -> int:
+    export = find_export(Path(args.export))
+    manifest = load_manifest(export)
+    actual_hash = file_sha256(export)
+    plan = build_upgrade_plan(manifest, actual_hash)
+    if not args.apply:
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        print("\n— это план. MANIFEST.json не изменён. "
+              "После подтверждения повтори с --apply и hash из плана.")
+        return 0
+    if args.base_manifest_sha256 != actual_hash:
+        raise MnemoError(
+            "состояние изменилось после плана; повтори upgrade без --apply и используй "
+            "hash из нового плана"
+        )
+    upgraded = apply_upgrade(manifest, plan, args.by, args.reason)
+    if upgraded is None:
+        print("экспорт уже приведён: известных изменений нет")
+        return 0
+    save_manifest(export, manifest)
+    print(f"{upgraded['id']}  применено изменений: {len(upgraded['changes'])}  "
+          f"версия: {manifest['mnemo_spec']}")
     return 0
 
 
@@ -1977,6 +2040,16 @@ nonmaterial, impacts}. creates содержит {kind, source_items, record}; mu
     p_review.add_argument("--apply", action="store_true")
     p_review.set_defaults(func=cmd_review)
 
+    p_upgrade = sub.add_parser(
+        "upgrade", help="привести известные legacy-случаи к текущему стандарту"
+    )
+    p_upgrade.add_argument("--export", default=".")
+    p_upgrade.add_argument("--apply", action="store_true")
+    p_upgrade.add_argument("--base-manifest-sha256")
+    p_upgrade.add_argument("--by")
+    p_upgrade.add_argument("--reason")
+    p_upgrade.set_defaults(func=cmd_upgrade)
+
     p_feedback = sub.add_parser("feedback", help="зафиксировать редакцию сообщения аудитории")
     p_feedback.add_argument("--export", default=".")
     p_feedback.add_argument("review")
@@ -2021,7 +2094,7 @@ nonmaterial, impacts}. creates содержит {kind, source_items, record}; mu
 # объяснением, а не тихо теряет чужие изменения.
 MUTATING = {"remove", "add-file", "add-text", "add-gap", "redact", "rehash",
             "req", "ask", "people", "decide", "fact", "audiences", "review",
-            "feedback", "deliver"}
+            "feedback", "deliver", "upgrade"}
 
 
 def main() -> int:

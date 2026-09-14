@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Линтер стандарта: правила V01–V20 из SPEC/STANDARD.md §13.
+"""Линтер стандарта: правила V01–V27 из SPEC/STANDARD.md §13.
 
 Детерминированный, без участия модели. Линтер, работающий «на усмотрение», —
 не линтер: он не может подтвердить, что архив цел, а именно это от него нужно.
@@ -31,8 +31,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mnemo_manifest import git_status, is_git_ignored  # noqa: E402
 from mnemo_reconcile import (  # noqa: E402
     IMPACT_KINDS, is_vague, new_decision, new_fact, packages_contract,
-    review_contract, review_number, sync_contract, validate_feedback_contract, validate_graph,
+    review_contract, review_material, review_number, sync_contract, validate_feedback_contract,
+    validate_graph, validate_review_change,
 )
+from mnemo_upgrade import validate_upgrades  # noqa: E402
 
 # Ссылки вида [текст](путь) — только относительные и локальные.
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
@@ -404,6 +406,27 @@ def check(export: Path) -> Report:
                 "V24", "since_s аудитории не указывает на существующую или следующую сверку", name
             )
 
+    for package in manifest.get("imports", []):
+        herald_keys = package.get("herald_keys")
+        if herald_keys is None:
+            continue
+        valid = isinstance(herald_keys, list) and bool(herald_keys)
+        pairs: list[tuple[int, int]] = []
+        if valid:
+            for key in herald_keys:
+                if not isinstance(key, dict) or set(key) != {"chat_id", "message_id"} \
+                        or type(key.get("chat_id")) is not int \
+                        or type(key.get("message_id")) is not int:
+                    valid = False
+                    break
+                pairs.append((key["chat_id"], key["message_id"]))
+        if package.get("parser") != "herald-inbox" or not valid \
+                or len(pairs) != len(set(pairs)):
+            report.error(
+                "V24", "herald_keys допустимы только у herald-inbox и требуют "
+                "уникальные целые chat_id/message_id", str(package.get("id") or "legacy"),
+            )
+
     # V21 / V22 / V25 — операционные хвосты. Они видны агрегатом и не делают
     # архив повреждённым даже в --strict: это работа, а не нарушение формата.
     packages = packages_contract(manifest)
@@ -418,6 +441,13 @@ def check(export: Path) -> Report:
         if review_ids:
             report.warn("V22", f"pending для {audience}: {len(review_ids)} сверок; "
                         f"старшая {review_ids[0]}")
+    if not manifest.get("export", {}).get("audiences"):
+        untracked = [review.get("id") for review in reviews
+                     if review.get("material")
+                     and not review.get("audience_not_needed_reason")]
+        if untracked:
+            report.warn("V22", "аудитории не настроены — синхронизация не проверяется; "
+                        "материальные сверки: " + ", ".join(untracked))
     if sync_state["unreviewed_changes"]:
         report.warn("V25", f"изменений мимо сверки: {len(sync_state['unreviewed_changes'])}; "
                     "записи: " + ", ".join(sync_state["unreviewed_records"]))
@@ -476,33 +506,10 @@ def check(export: Path) -> Report:
             changed.update(source_items)
             if not source_items or not source_items <= scoped:
                 report.error("V24", "change без source_items или вне scope", rid)
-            if change.get("record") not in known_records:
-                report.error("V24", f"change ведёт в неизвестную запись {change.get('record')}", rid)
-            delta = change.get("delta") or []
-            if not delta or any("before" not in d or "after" not in d for d in delta):
-                report.error("V24", "change без полной delta before/after", rid)
-            action = change.get("action")
-            if action not in ("created", "superseded", "answered", "confirmed", "updated"):
-                report.error("V24", f"неизвестный action {action!r}", rid)
-            fields = [entry.get("field") for entry in delta]
-            if len(fields) != len(set(fields)):
-                report.error("V24", "delta повторяет одно поле", rid)
-            record_id = change.get("record")
-            if action == "created" and not any(
-                    entry.get("field") == "id" and entry.get("before") is None
-                    and entry.get("after") == record_id for entry in delta):
-                report.error("V24", "created не соответствует delta", rid)
-            if action == "superseded" and not any(
-                    record.get("supersedes") == record_id for record in record_map.values()):
-                report.error("V24", "superseded не подтверждён заменяющей записью", rid)
-            if action == "answered" and not any(
-                    entry.get("field") == "answered_by" and entry.get("after")
-                    for entry in delta):
-                report.error("V24", "answered не соответствует delta", rid)
-            if action == "confirmed" and not any(
-                    entry.get("field") == "based_on" and entry.get("after")
-                    for entry in delta):
-                report.error("V24", "confirmed не соответствует delta", rid)
+            try:
+                validate_review_change(manifest, change)
+            except MnemoError as exc:
+                report.error("V24", str(exc), rid)
         nonmaterial = set()
         for group in review.get("nonmaterial") or []:
             nonmaterial.update(group.get("items") or [])
@@ -528,6 +535,16 @@ def check(export: Path) -> Report:
             validate_feedback_contract(manifest, review)
         except MnemoError as exc:
             report.error("V24", str(exc), rid)
+        no_audience_reason = review.get("audience_not_needed_reason")
+        if no_audience_reason and (
+                audience_names or not review_material(manifest, review)
+                or is_vague(no_audience_reason)):
+            report.error("V24", "неприменимый audience_not_needed_reason", rid)
+
+    # V27 — upgrade является единственным контролируемым исключением из
+    # заморозки legacy-сверки, поэтому его след обязан быть самопроверяемым.
+    for where, message in validate_upgrades(manifest):
+        report.error("V27", message, where)
 
     # V17 — на один файл ровно одна запись. Две записи на один путь означают,
     # что материалов в архиве меньше, чем он показывает: содержимое одного
