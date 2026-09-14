@@ -10,7 +10,7 @@ from typing import Any
 from mnemo_core import SPEC_VERSION, MnemoError, next_id, parse_day, today
 from mnemo_reconcile import (
     is_vague, packages_contract, review_contract, sync_contract,
-    validate_review_change,
+    review_change_problem, validate_review_change,
 )
 
 
@@ -43,30 +43,56 @@ def applied_fingerprints(manifest: dict) -> set[str]:
 
 def build_upgrade_plan(manifest: dict, base_manifest_sha256: str) -> dict:
     candidates: list[dict] = []
+    unhandled = list(KNOWN_UNHANDLED)
     for review in manifest.get("reviews", []):
         review_id = str(review.get("id"))
         for index, change in enumerate(review.get("changes", [])):
+            problem = review_change_problem(manifest, change)
+            if problem is None:
+                continue
+            problem_code, problem_message = problem
             action = change.get("action")
             delta = change.get("delta") or []
-            expected_field = {"answered": "answered_by", "confirmed": "based_on"}.get(action)
-            semantic = next((row for row in delta
-                             if row.get("field") == expected_field), None)
-            if action not in ("answered", "confirmed") or not semantic or semantic.get("after"):
-                continue
             target = f"{review_id}.changes[{index}]"
-            if semantic.get("before") == semantic.get("after"):
+            if problem_code == "noop":
+                fully_noop = delta and all(
+                    row.get("before") == row.get("after") for row in delta
+                )
+                if fully_noop and action in (
+                        "updated", "answered", "unanswered", "confirmed"):
+                    candidates.append(_candidate(
+                        "drop-noop-review-change", target, change, None,
+                        problem_message, review=review_id, index=index,
+                        source_items=list(change.get("source_items") or []),
+                    ))
+                else:
+                    unhandled.append(f"V24 {target}: {problem_message}")
+                continue
+
+            replacement = {
+                "updated-should-be-answered": "answered",
+                "updated-should-be-unanswered": "unanswered",
+                "updated-should-be-confirmed": "confirmed",
+            }.get(problem_code)
+            if replacement is None and problem_code in (
+                    "answered-mismatch", "confirmed-mismatch"):
+                expected_field = (
+                    "answered_by" if problem_code == "answered-mismatch" else "based_on"
+                )
+                semantic = next((row for row in delta
+                                 if row.get("field") == expected_field), None)
+                if semantic is not None and not semantic.get("after"):
+                    replacement = (
+                        "unanswered" if expected_field == "answered_by"
+                        and semantic.get("before") else "updated"
+                    )
+            if replacement is not None:
                 candidates.append(_candidate(
-                    "drop-noop-review-change", target, change, None,
-                    "legacy change не меняет значение", review=review_id, index=index,
-                    source_items=list(change.get("source_items") or []),
+                    "reclassify-review-action", target, action, replacement,
+                    problem_message, review=review_id, index=index,
                 ))
             else:
-                after = ("unanswered" if semantic.get("field") == "answered_by"
-                         and semantic.get("before") else "updated")
-                candidates.append(_candidate(
-                    "reclassify-review-action", target, action, after,
-                    "action противоречит пустому delta.after", review=review_id, index=index,
-                ))
+                unhandled.append(f"V24 {target}: {problem_message}")
 
     for index, imported in enumerate(manifest.get("imports", [])):
         if imported.get("id") or "items" in imported:
@@ -96,7 +122,7 @@ def build_upgrade_plan(manifest: dict, base_manifest_sha256: str) -> dict:
         "from_spec": str(manifest.get("mnemo_spec", "0")),
         "to_spec": SPEC_VERSION,
         "changes": pending,
-        "known_unhandled": list(KNOWN_UNHANDLED),
+        "known_unhandled": unhandled,
     }
 
 

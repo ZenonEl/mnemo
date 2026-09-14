@@ -123,6 +123,103 @@ class ReviewRegression(ReconcileCase):
 
 
 class UpgradeCommand(ReconcileCase):
+    def test_unhandled_v24_problem_is_named_in_plan(self) -> None:
+        created = self.man("req", "--quote", "Нужен отчёт", "--wanted-by", "petr-ivanov")
+        self.assertEqual(created.returncode, 0, created.stderr)
+        item, package = self.add_text("unknown-action", "Состояние изменилось")
+        path = self.export / "MANIFEST.json"
+        manifest = self.manifest()
+        manifest["reviews"].append({
+            "id": "s001", "date": "2026-09-14", "by": "operator",
+            "scope": [package], "changes": [{
+                "action": "legacy-action", "record": "t001", "source_items": [item],
+                "delta": [{"field": "state", "before": "stated", "after": "accepted"}],
+                "note": None,
+            }], "nonmaterial": [], "impacts": [], "feedback": [], "note": None,
+        })
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8")
+        plan = json.loads(self.man("upgrade").stdout.split("\n\n—", 1)[0])
+        self.assertEqual(plan["changes"], [])
+        self.assertIn("V24 s001.changes[0]: неизвестный action", plan["known_unhandled"][2])
+
+    def test_repairs_all_three_v24_shapes_from_live_archive(self) -> None:
+        seed, seed_package = self.add_text("seed", "Нужно выбрать способ оплаты")
+        question = {
+            "kind": "question", "source_items": [seed],
+            "record": {"text": "Как платить?", "impact": "меняет сценарий оплаты",
+                       "self_attempt": "проверил пакет — ответа нет",
+                       "asked_of": "petr-ivanov", "based_on": [f"ctx:priyomka#{seed}"]},
+        }
+        self.assertEqual(
+            self.apply_plan(self.plan(scope=[seed_package], creates=[question])).returncode, 0
+        )
+        for number in range(1, 5):
+            created = self.man(
+                "req", "--quote", f"Требование {number}", "--wanted-by", "petr-ivanov",
+                "--anyway",
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+
+        package_rows = [self.add_text(f"legacy-{number}") for number in range(8)]
+        changes = [
+            {"action": "updated", "record": "q001",
+             "delta": [{"field": "answered_by", "before": "ctx:priyomka#d012",
+                        "after": None}]},
+            {"action": "updated", "record": "q001",
+             "delta": [{"field": "answered_by", "before": "ctx:priyomka#i439",
+                        "after": None}]},
+            *[
+                {"action": "confirmed", "record": f"t{number:03d}",
+                 "delta": [{"field": "based_on",
+                            "before": ["ctx:priyomka#i001", "ctx:priyomka#i002"],
+                            "after": ["ctx:priyomka#i001", "ctx:priyomka#i002"]}]}
+                for number in range(1, 5)
+            ],
+            {"action": "updated", "record": "q001",
+             "delta": [{"field": "where", "before": None, "after": None}]},
+            {"action": "updated", "record": "q001",
+             "delta": [{"field": "note", "before": None, "after": None}]},
+        ]
+        path = self.export / "MANIFEST.json"
+        manifest = self.manifest()
+        for offset, ((item_id, package_id), change) in enumerate(
+                zip(package_rows, changes), start=2):
+            change["source_items"] = [item_id]
+            change["note"] = None
+            manifest["reviews"].append({
+                "id": f"s{offset:03d}", "date": "2026-09-14", "by": "operator",
+                "scope": [package_id], "changes": [change], "nonmaterial": [],
+                "impacts": [], "feedback": [], "note": None,
+            })
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8")
+
+        broken = json.loads(run(
+            "mnemo_verify.py", "--export", str(self.export), "--json",
+        ).stdout)
+        self.assertEqual(len([row for row in broken["errors"] if row["code"] == "V24"]), 8)
+        dry = json.loads(self.man("upgrade").stdout.split("\n\n—", 1)[0])
+        self.assertEqual(
+            [row["kind"] for row in dry["changes"]].count("reclassify-review-action"), 2
+        )
+        self.assertEqual(
+            [row["kind"] for row in dry["changes"]].count("drop-noop-review-change"), 6
+        )
+        self.assertEqual(dry["known_unhandled"][2:], [])
+        applied = self.man(
+            "upgrade", "--apply", "--base-manifest-sha256",
+            dry["base_manifest_sha256"], "--by", "operator", "--reason",
+            "исправлены восемь известных legacy-ошибок V24",
+        )
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        checked = json.loads(run(
+            "mnemo_verify.py", "--export", str(self.export), "--json",
+        ).stdout)
+        self.assertEqual([row for row in checked["errors"] if row["code"] == "V24"], [])
+        repeated = json.loads(self.man("upgrade").stdout.split("\n\n—", 1)[0])
+        self.assertEqual(repeated["changes"], [])
+
     def test_repairs_old_action_preserves_legacy_import_and_acknowledges_sync(self) -> None:
         item, package = self.add_text("legacy", "Нужно выбрать способ оплаты")
         create = {

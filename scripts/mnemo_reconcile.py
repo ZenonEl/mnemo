@@ -275,54 +275,65 @@ def review_material(manifest: dict, review: dict) -> bool:
     )
 
 
-def validate_review_change(manifest: dict, change: dict) -> None:
-    """Единый контракт action/delta для writer и V24."""
+def review_change_problem(manifest: dict, change: dict) -> tuple[str, str] | None:
+    """Первая детерминированная проблема action/delta, общая writer, V24 и upgrade."""
     records = {r.get("id"): r for bucket in (
         "requirements", "questions", "decisions", "facts"
     ) for r in manifest.get(bucket, [])}
     record_id = change.get("record")
     if record_id not in records:
-        raise MnemoError(f"change ведёт в неизвестную запись {record_id}")
+        return "unknown-record", f"change ведёт в неизвестную запись {record_id}"
     if not change.get("source_items"):
-        raise MnemoError("change без source_items")
+        return "missing-source-items", "change без source_items"
     delta = change.get("delta") or []
     if not delta or any("before" not in row or "after" not in row for row in delta):
-        raise MnemoError("change без полной delta before/after")
+        return "incomplete-delta", "change без полной delta before/after"
     fields = [row.get("field") for row in delta]
     if len(fields) != len(set(fields)):
-        raise MnemoError("delta повторяет одно поле")
+        return "duplicate-field", "delta повторяет одно поле"
     if any(row.get("before") == row.get("after") for row in delta):
-        raise MnemoError("delta не меняет значение")
+        return "noop", "delta не меняет значение"
 
     action = change.get("action")
     allowed = ("created", "superseded", "answered", "unanswered", "confirmed", "updated")
     if action not in allowed:
-        raise MnemoError(f"неизвестный action {action!r}")
+        return "unknown-action", f"неизвестный action {action!r}"
     if action == "created" and not any(
             row.get("field") == "id" and row.get("before") is None
             and row.get("after") == record_id for row in delta):
-        raise MnemoError("created не соответствует delta")
+        return "created-mismatch", "created не соответствует delta"
     if action == "superseded" and not any(
             record.get("supersedes") == record_id for record in records.values()):
-        raise MnemoError("superseded не подтверждён заменяющей записью")
+        return "superseded-mismatch", "superseded не подтверждён заменяющей записью"
     if action == "answered" and not any(
             row.get("field") == "answered_by" and row.get("after") for row in delta):
-        raise MnemoError("answered не соответствует delta")
+        return "answered-mismatch", "answered не соответствует delta"
     if action == "unanswered" and not any(
             row.get("field") == "answered_by" and row.get("before")
             and not row.get("after") for row in delta):
-        raise MnemoError("unanswered не соответствует delta")
+        return "unanswered-mismatch", "unanswered не соответствует delta"
     if action == "confirmed" and not any(
             row.get("field") == "based_on" and row.get("after") for row in delta):
-        raise MnemoError("confirmed не соответствует delta")
+        return "confirmed-mismatch", "confirmed не соответствует delta"
     if action == "updated":
         if any(row.get("field") == "answered_by" and row.get("after") for row in delta):
-            raise MnemoError("updated должен быть answered для непустого answered_by")
+            return "updated-should-be-answered", \
+                "updated должен быть answered для непустого answered_by"
         if any(row.get("field") == "answered_by" and row.get("before")
                and not row.get("after") for row in delta):
-            raise MnemoError("updated должен быть unanswered при снятии ответа")
+            return "updated-should-be-unanswered", \
+                "updated должен быть unanswered при снятии ответа"
         if any(row.get("field") == "based_on" and row.get("after") for row in delta):
-            raise MnemoError("updated должен быть confirmed для непустого based_on")
+            return "updated-should-be-confirmed", \
+                "updated должен быть confirmed для непустого based_on"
+    return None
+
+
+def validate_review_change(manifest: dict, change: dict) -> None:
+    """Единый контракт action/delta для writer и V24."""
+    problem = review_change_problem(manifest, change)
+    if problem:
+        raise MnemoError(problem[1])
 
 
 def apply_review_plan(manifest: dict, plan: dict) -> dict:
@@ -819,6 +830,14 @@ def sync_contract(manifest: dict, packages: list[dict], reviews: list[dict]) -> 
         for change in upgrade.get("changes", [])
         if change.get("kind") == "acknowledge-unreviewed-change"
     }
+    acknowledged_pairs.update(
+        (change.get("before", {}).get("record"), item_id)
+        for upgrade in manifest.get("upgrades", [])
+        for change in upgrade.get("changes", [])
+        if change.get("kind") == "drop-noop-review-change"
+        and isinstance(change.get("before"), dict)
+        for item_id in change.get("before", {}).get("source_items") or []
+    )
     unreviewed_changes = []
     for bucket in ("requirements", "questions", "decisions", "facts"):
         for record in manifest.get(bucket, []):
