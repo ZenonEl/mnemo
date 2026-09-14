@@ -71,9 +71,9 @@ class ReconcileCase(unittest.TestCase):
 
     def plan(self, *, scope: list[str], creates: list[dict] | None = None,
              mutations: list[dict] | None = None, nonmaterial: list[dict] | None = None,
-             impacts: list[dict] | None = None) -> Path:
+             impacts: list[dict] | None = None, audience_waiver: bool = True) -> Path:
         path = self.tmp / "review-plan.json"
-        path.write_text(json.dumps({
+        plan = {
             "base_manifest_sha256": self.manifest_hash(),
             "by": "operator",
             "scope": scope,
@@ -81,7 +81,12 @@ class ReconcileCase(unittest.TestCase):
             "mutations": mutations or [],
             "nonmaterial": nonmaterial or [],
             "impacts": impacts or [],
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        }
+        if audience_waiver and not self.manifest()["export"].get("audiences"):
+            plan["audience_not_needed_reason"] = (
+                "тестовый экспорт не имеет адресной синхронизации"
+            )
+        path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
     def apply_plan(self, path: Path) -> subprocess.CompletedProcess:
@@ -287,7 +292,7 @@ class FrozenReview(ReconcileCase):
         removed = self.man("remove", "--id", item_id, "--reason", "дубликат материала",
                            "--confirm")
         self.assertEqual(removed.returncode, 0, removed.stderr)
-        done = self.apply_plan(self.plan(scope=[package_id]))
+        done = self.apply_plan(self.plan(scope=[package_id], audience_waiver=False))
         self.assertEqual(done.returncode, 0, done.stderr)
         checked = run("mnemo_verify.py", "--export", str(self.export))
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
@@ -332,6 +337,7 @@ class FrozenReview(ReconcileCase):
         second_plan = self.plan(
             scope=[package_id],
             nonmaterial=[{"items": [item_id], "reason": "повтор уже принятого требования"}],
+            audience_waiver=False,
         )
         previewed = self.man("review", "--plan-file", str(second_plan))
         self.assertEqual(previewed.returncode, 0, previewed.stderr)
@@ -397,7 +403,9 @@ class FrozenReview(ReconcileCase):
                 "asked_of": "operator", "based_on": [f"ctx:priyomka#{item_id}"],
             },
         }
-        done = self.apply_plan(self.plan(scope=[package_id], creates=[create]))
+        done = self.apply_plan(self.plan(
+            scope=[package_id], creates=[create], audience_waiver=False,
+        ))
         self.assertEqual(done.returncode, 0, done.stderr)
         audit = run("mnemo_audit.py", "--export", str(self.export), "--json")
         self.assertFalse(json.loads(audit.stdout)["reviews"][0]["material"])
@@ -443,7 +451,7 @@ class FrozenReview(ReconcileCase):
         plan = self.plan(scope=[package_id], mutations=[{
             "record": "t001", "field": "based_on",
             "value": [f"ctx:priyomka#{item_id}"], "source_items": [item_id],
-        }])
+        }], audience_waiver=False)
         done = self.apply_plan(plan)
         self.assertEqual(done.returncode, 0, done.stderr)
         data = json.loads(run("mnemo_audit.py", "--export", str(self.export), "--json").stdout)
@@ -694,7 +702,9 @@ class DecisionsAndFacts(ReconcileCase):
             "record": {"text": "Шлюз уже доступен", "stated_by": "petr-ivanov",
                        "based_on": [f"ctx:priyomka#{item_id}"]},
         }
-        done = self.apply_plan(self.plan(scope=[package_id], creates=[claim]))
+        done = self.apply_plan(self.plan(
+            scope=[package_id], creates=[claim], audience_waiver=False,
+        ))
         self.assertEqual(done.returncode, 0, done.stderr)
         data = json.loads(run("mnemo_audit.py", "--export", str(self.export), "--json").stdout)
         self.assertEqual(data["facts"][0]["standing"], "claim")

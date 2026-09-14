@@ -24,7 +24,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-SPEC_VERSION = "1.17"
+SPEC_VERSION = "1.18"
 SPEC_MAJOR = 1
 
 # Предел на слаг в имени файла. Имя складывается из даты, слага и имени
@@ -351,6 +351,7 @@ def empty_manifest(slug: str, title: str, project: str | None = None,
         "reviews": [],
         "decisions": [],
         "facts": [],
+        "upgrades": [],
     }
 
 
@@ -366,6 +367,7 @@ SECTION_SINCE = (
     ("reviews", "1.17"),
     ("decisions", "1.17"),
     ("facts", "1.17"),
+    ("upgrades", "1.18"),
 )
 
 # Поле записи → версия стандарта, в которой оно появилось. Карта по РОДАМ, а не
@@ -378,7 +380,11 @@ SECTION_SINCE = (
 # так что дыра в ней выключает оба механизма разом.
 FIELD_SINCE = {
     "items": (("attribution", "1.1"),),
-    "imports": (("id", "1.17"), ("kind", "1.17"), ("items", "1.17")),
+    "imports": (
+        ("id", "1.17"), ("kind", "1.17"), ("items", "1.17"),
+        ("herald_keys", "1.18"),
+    ),
+    "reviews": (("audience_not_needed_reason", "1.18"),),
     "requirements": (
         ("tried", "1.16"), ("returned", "1.16"), ("dead_end", "1.16"),
     ),
@@ -446,6 +452,7 @@ def load_manifest(export: Path) -> dict:
     data.setdefault("reviews", [])
     data.setdefault("decisions", [])
     data.setdefault("facts", [])
+    data.setdefault("upgrades", [])
     return data
 
 
@@ -486,6 +493,7 @@ def next_id(manifest: dict, kind: str = "item") -> str:
         "review": ("s", "reviews"),
         "decision": ("d", "decisions"),
         "fact": ("f", "facts"),
+        "upgrade": ("u", "upgrades"),
     }[kind]
     used = 0
     # Отставленные идентификаторы учитываются наравне с живыми: §5 требует, что

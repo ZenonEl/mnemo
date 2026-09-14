@@ -125,6 +125,10 @@ class HeraldInboxParser(Parser):
 
         skipped_media = 0
         for row in rows:
+            result.herald_keys.append({
+                "chat_id": int(row["chat_id"]),
+                "message_id": int(row["message_id"]),
+            })
             author, via, attribution = _authorship(row)
             shown = str(row.get("origin_name") or "").strip()
             media = row.get("local_path")

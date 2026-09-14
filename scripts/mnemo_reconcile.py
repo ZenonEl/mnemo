@@ -254,7 +254,7 @@ def _material_change(manifest: dict, change: dict) -> bool:
     action, record_id = change.get("action"), str(change.get("record") or "")
     if action == "superseded" or (action == "created" and record_id.startswith(("t", "d"))):
         return True
-    if action == "answered" and record_id.startswith("q"):
+    if action in ("answered", "unanswered") and record_id.startswith("q"):
         return True
     if action == "created" and record_id.startswith("f"):
         fact = next((f for f in manifest.get("facts", []) if f.get("id") == record_id), {})
@@ -273,6 +273,56 @@ def review_material(manifest: dict, review: dict) -> bool:
     return bool(review.get("impacts")) or any(
         _material_change(manifest, change) for change in review.get("changes", [])
     )
+
+
+def validate_review_change(manifest: dict, change: dict) -> None:
+    """Единый контракт action/delta для writer и V24."""
+    records = {r.get("id"): r for bucket in (
+        "requirements", "questions", "decisions", "facts"
+    ) for r in manifest.get(bucket, [])}
+    record_id = change.get("record")
+    if record_id not in records:
+        raise MnemoError(f"change ведёт в неизвестную запись {record_id}")
+    if not change.get("source_items"):
+        raise MnemoError("change без source_items")
+    delta = change.get("delta") or []
+    if not delta or any("before" not in row or "after" not in row for row in delta):
+        raise MnemoError("change без полной delta before/after")
+    fields = [row.get("field") for row in delta]
+    if len(fields) != len(set(fields)):
+        raise MnemoError("delta повторяет одно поле")
+    if any(row.get("before") == row.get("after") for row in delta):
+        raise MnemoError("delta не меняет значение")
+
+    action = change.get("action")
+    allowed = ("created", "superseded", "answered", "unanswered", "confirmed", "updated")
+    if action not in allowed:
+        raise MnemoError(f"неизвестный action {action!r}")
+    if action == "created" and not any(
+            row.get("field") == "id" and row.get("before") is None
+            and row.get("after") == record_id for row in delta):
+        raise MnemoError("created не соответствует delta")
+    if action == "superseded" and not any(
+            record.get("supersedes") == record_id for record in records.values()):
+        raise MnemoError("superseded не подтверждён заменяющей записью")
+    if action == "answered" and not any(
+            row.get("field") == "answered_by" and row.get("after") for row in delta):
+        raise MnemoError("answered не соответствует delta")
+    if action == "unanswered" and not any(
+            row.get("field") == "answered_by" and row.get("before")
+            and not row.get("after") for row in delta):
+        raise MnemoError("unanswered не соответствует delta")
+    if action == "confirmed" and not any(
+            row.get("field") == "based_on" and row.get("after") for row in delta):
+        raise MnemoError("confirmed не соответствует delta")
+    if action == "updated":
+        if any(row.get("field") == "answered_by" and row.get("after") for row in delta):
+            raise MnemoError("updated должен быть answered для непустого answered_by")
+        if any(row.get("field") == "answered_by" and row.get("before")
+               and not row.get("after") for row in delta):
+            raise MnemoError("updated должен быть unanswered при снятии ответа")
+        if any(row.get("field") == "based_on" and row.get("after") for row in delta):
+            raise MnemoError("updated должен быть confirmed для непустого based_on")
 
 
 def apply_review_plan(manifest: dict, plan: dict) -> dict:
@@ -405,23 +455,27 @@ def apply_review_plan(manifest: dict, plan: dict) -> dict:
             raise MnemoError(f"поле {record_id}.{field} изменяется в плане больше одного раза")
         mutated_fields.add(mutation_key)
         before = record.get(field)
-        record[field] = mutation.get("value")
+        candidate = {**record, field: mutation.get("value")}
         if bucket == "requirements":
-            normalized = new_requirement(**record)
+            normalized = new_requirement(**candidate)
         elif bucket == "questions":
-            normalized = new_question(**record)
+            normalized = new_question(**candidate)
         elif bucket == "decisions":
-            normalized = new_decision(staged, **record)
+            normalized = new_decision(staged, **candidate)
         else:
-            normalized = new_fact(staged, **record)
+            normalized = new_fact(staged, **candidate)
+        after = normalized.get(field)
+        if before == after:
+            raise MnemoError(f"поле {record_id}.{field} уже имеет это значение")
         record.clear()
         record.update(normalized)
-        action = "answered" if field == "answered_by" else \
-            "confirmed" if field == "based_on" else "updated"
+        action = "answered" if field == "answered_by" and after else \
+            "unanswered" if field == "answered_by" else \
+            "confirmed" if field == "based_on" and after else "updated"
         changes.append({"action": action, "record": record_id,
                         "source_items": list(mutation.get("source_items") or []),
                         "delta": [{"field": field, "before": before,
-                                   "after": record.get(field)}],
+                                   "after": after}],
                         "note": mutation.get("note")})
 
     review = {
@@ -429,11 +483,27 @@ def apply_review_plan(manifest: dict, plan: dict) -> dict:
         "scope": scope, "changes": changes, "nonmaterial": nonmaterial,
         "impacts": impacts, "feedback": [], "note": plan.get("note"),
     }
+    if plan.get("audience_not_needed_reason") is not None:
+        review["audience_not_needed_reason"] = plan["audience_not_needed_reason"]
     manifest["requirements"] = staged["requirements"]
     manifest["questions"] = staged["questions"]
     manifest["decisions"] = staged.get("decisions", [])
     manifest["facts"] = staged.get("facts", [])
     validate_graph(staged)
+    for change in changes:
+        validate_review_change(staged, change)
+    material = review_material(staged, review)
+    audiences = staged.get("export", {}).get("audiences", [])
+    no_audience_reason = review.get("audience_not_needed_reason")
+    if material and not audiences and is_vague(no_audience_reason):
+        raise MnemoError(
+            "материальная сверка требует аудиторию или содержательный "
+            "audience_not_needed_reason"
+        )
+    if (not material or audiences) and no_audience_reason:
+        raise MnemoError(
+            "audience_not_needed_reason допустим только для материальной сверки без аудиторий"
+        )
     known_records = {r.get("id") for bucket in ("requirements", "questions", "decisions", "facts")
                      for r in staged.get(bucket, [])}
     for impact in impacts:
@@ -723,7 +793,8 @@ def packages_contract(manifest: dict) -> list[dict]:
             for group in review.get("nonmaterial", []):
                 covered_items.update(group.get("items") or [])
         uncovered = [item_id for item_id in live_items if item_id not in covered_items]
-        result.append({**package, "covered": not uncovered,
+        visible = {key: value for key, value in package.items() if key != "herald_keys"}
+        result.append({**visible, "covered": not uncovered,
                        "uncovered_items": uncovered,
                        "reviews": [review["id"] for review in related]})
     return result
@@ -742,6 +813,12 @@ def sync_contract(manifest: dict, packages: list[dict], reviews: list[dict]) -> 
                       for review in manifest.get("reviews", [])
                       for change in review.get("changes", [])
                       for item_id in change.get("source_items") or []}
+    acknowledged_pairs = {
+        (change.get("record"), change.get("item"))
+        for upgrade in manifest.get("upgrades", [])
+        for change in upgrade.get("changes", [])
+        if change.get("kind") == "acknowledge-unreviewed-change"
+    }
     unreviewed_changes = []
     for bucket in ("requirements", "questions", "decisions", "facts"):
         for record in manifest.get(bucket, []):
@@ -750,7 +827,8 @@ def sync_contract(manifest: dict, packages: list[dict], reviews: list[dict]) -> 
                 refs.append(record["answered_by"])
             for ref in refs:
                 item_id = str(ref).rsplit("#", 1)[-1]
-                if item_id in packaged and (record.get("id"), item_id) not in reviewed_pairs:
+                pair = (record.get("id"), item_id)
+                if item_id in packaged and pair not in reviewed_pairs and pair not in acknowledged_pairs:
                     unreviewed_changes.append({"record": record.get("id"), "item": item_id})
     return {
         "uncovered_packages": [p["id"] for p in packages if not p["covered"]],

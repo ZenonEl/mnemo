@@ -256,7 +256,15 @@ def report(manifest: dict, data: dict, open_only: bool) -> list[str]:
     if audiences or reviews:
         out += ["━━━ СИНХРОНИЗАЦИЯ ПО АУДИТОРИЯМ ━━━", ""]
         if not audiences:
-            out.append("  Аудитории не настроены — обязательная доставка не отслеживается.")
+            untracked = [review["id"] for review in reviews
+                         if review.get("material")
+                         and not review.get("audience_not_needed_reason")]
+            if untracked:
+                out.append("  Аудитории не настроены — синхронизация не проверяется: "
+                           + ", ".join(untracked))
+            else:
+                out.append("  Аудитории не настроены; для материальных сверок явно "
+                           "указано, что адресная синхронизация не нужна.")
         for audience in audiences:
             name = audience.get("name")
             pending_sync = sync.get("pending_for", {}).get(name, [])
