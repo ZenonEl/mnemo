@@ -213,13 +213,30 @@ def check(root: Path) -> list[str]:
                 )
 
     # Команды: README перечисляет ровно то, что лежит в commands/.
-    readme = (root / "README.md").read_text(encoding="utf-8")
+    #
+    # Проверяются ОБА README. С появлением перевода у описания стало две копии,
+    # а копия без проверки на равенство расходится молча — ровно тот дефект,
+    # против которого заведён весь проект. Дешевле всего ловить его по списку
+    # команд: он меняется чаще прозы и ломается заметнее.
     on_disk = {f.stem for f in (root / "commands").glob("*.md")}
-    in_readme = set(re.findall(r"`/mnemo:([a-z-]+)`", readme))
-    for missing in sorted(on_disk - in_readme):
-        problems.append(f"команда /mnemo:{missing} существует, но не указана в README")
-    for phantom in sorted(in_readme - on_disk):
-        problems.append(f"README обещает /mnemo:{phantom}, а файла команды нет")
+    listings = {}
+    for name in ("README.md", "README.ru.md"):
+        path = root / name
+        if not path.is_file():
+            problems.append(f"{name} отсутствует: описание должно быть на двух языках")
+            continue
+        listed = set(re.findall(r"`/mnemo:([a-z-]+)`", path.read_text(encoding="utf-8")))
+        listings[name] = listed
+        for missing in sorted(on_disk - listed):
+            problems.append(f"команда /mnemo:{missing} существует, но не указана в {name}")
+        for phantom in sorted(listed - on_disk):
+            problems.append(f"{name} обещает /mnemo:{phantom}, а файла команды нет")
+    if len(listings) == 2:
+        left, right = listings["README.md"], listings["README.ru.md"]
+        for only_en in sorted(left - right):
+            problems.append(f"/mnemo:{only_en} есть в README.md, но не в README.ru.md")
+        for only_ru in sorted(right - left):
+            problems.append(f"/mnemo:{only_ru} есть в README.ru.md, но не в README.md")
 
     # Ссылки на разделы стандарта ведут в существующие разделы.
     sections = set(re.findall(r"^## (\d+)[а-я]?\.", standard, re.M))

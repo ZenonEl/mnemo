@@ -1,83 +1,95 @@
 # mnemo
 
-**Единый стандарт чат-экспортов — для Claude Code и Codex.**
+[![Version](https://img.shields.io/badge/version-0.16.0-blue.svg)](CHANGELOG.md)
+[![License](https://img.shields.io/badge/code-AGPL--3.0--or--later-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-CC%20BY--SA%204.0-lightgrey.svg)](SPEC/LICENSE)
 
-Переписка с заказчиком, ТЗ в `.docx`, скрины, транскрипты созвонов складываются в
-архив, у которого известно происхождение каждого куска и который проверяется
-линтером, а не глазами.
+**English** · [Русский](README.ru.md)
 
-```
-/mnemo:init          создать экспорт или принять существующий
-/mnemo:import        выгрузка, буфер захвата или копипаста → разложить целиком
-/mnemo:add-text      сообщение или транскрипт → RAW
-/mnemo:add-files     документы → RAW, текст и вшитые картинки извлекаются
-/mnemo:add-screens   скриншоты → RAW, байт-в-байт
-/mnemo:verify        проверить, что архив цел и соответствует стандарту
-```
+**One chat-export standard — for Claude Code and Codex.**
 
-Это **названия операций**. В Claude Code они же — команды сессии; в Codex ту же
-работу делает навык `mnemo:chat-export`, вызывая скрипты напрямую. Архив
-получается один и тот же, читается без инструмента и проверяется одним линтером.
-
-Вторая половина — про **состояние работы**, а не про материал:
+Client conversations, briefs in `.docx`, screenshots, call transcripts go into an
+archive where the origin of every piece is known, and which a linter checks
+instead of your eyes.
 
 ```
-/mnemo:req           требование заказчика: дословно, с доказательством
-/mnemo:ask           открытый вопрос: что блокирует, кому задан
-/mnemo:audit         всё ли сделано, как хотел заказчик
-/mnemo:gaps          чего не хватает и что утрачено
+/mnemo:init          create an export, or adopt an existing one
+/mnemo:import        a chat dump, a capture buffer or a paste → filed whole
+/mnemo:add-text      a message or transcript → RAW
+/mnemo:add-files     documents → RAW, text and embedded images extracted
+/mnemo:add-screens   screenshots → RAW, byte for byte
+/mnemo:verify        check the archive is intact and matches the standard
 ```
 
-За неё отвечает навык `mnemo:work-state`. Он поднимается от фраз человека — «всё
-ли мы сделали по ТЗ», «я упёрся», «надо спросить», — в обоих хостах и одинаково.
+These are **names of operations**. In Claude Code they are also session
+commands; in Codex the same work is done by the `mnemo:chat-export` skill
+calling the scripts directly. The archive comes out identical, reads without the
+tool, and is checked by one linter.
 
-Третья часть — **сверка нового пакета с проектом**:
+The second half is about **the state of the work**, not the material:
 
 ```
-audiences             кому обязаны понятной синхронизацией и с какой сверки
-review                 что новый пакет изменил в действующем состоянии
-feedback / deliver     точный brief и отметка фактической доставки
-decide / fact          решения и утверждения с происхождением
+/mnemo:req           a client requirement: verbatim, with proof
+/mnemo:ask           an open question: what it blocks, who it is asked of
+/mnemo:audit         is everything done the way the client wanted
+/mnemo:gaps          what is missing and what is lost for good
 ```
 
-Навык `mnemo:reconcile` поднимается, когда принесли очередной поток сообщений и
-надо понять, как он меняет прошлые договорённости. Для руководства без
-проектного контекста он готовит короткое подтверждение либо одно содержательное
-уточнение; технические ссылки и детали по умолчанию не показывает. Herald,
-Ephemeris и Kanon подключаются мягко и не требуются для самой сверки.
+The `mnemo:work-state` skill owns this half. It is raised by what a person says
+— "did we do everything in the brief", "I'm stuck", "we need to ask" — in both
+hosts, identically.
+
+The third part **reconciles a new batch against the project**:
+
+```
+audiences             who is owed clear synchronisation, and from which review
+review                what the new batch changed in the standing state
+feedback / deliver    the exact brief, and the mark of actual delivery
+decide / fact         decisions and claims with their origin
+```
+
+The `mnemo:reconcile` skill is raised when the next stream of messages arrives
+and someone has to work out how it changes earlier agreements. For a manager
+with no project context it prepares either a short confirmation or one
+substantive clarification; by default it shows no internal references or
+technical detail. Herald, Ephemeris and Kanon attach softly and are not required
+for the reconciliation itself.
 
 ---
 
-## Зачем
+## Why
 
-Рабочий контекст разбирается руками и каждый раз чуть по-своему. Через месяц
-непонятно, что в архиве дословная цитата заказчика, а что чей-то конспект — а
-решения принимаются по обоим одинаково.
+Work context gets sorted out by hand, and slightly differently every time. A
+month later nobody can tell which part of the archive is the client's own words
+and which is somebody's summary — while decisions get made on both alike.
 
-mnemo фиксирует это как формат:
+mnemo fixes that as a format:
 
-- **RAW дословен и неизменен.** Каждый файл учтён с `sha256` — подмена видна.
-- **Кто есть кто.** Реестр людей связывает имя в мессенджере, логин в git и имя
-  в разговоре; роль `self` отмечает того, кто ведёт архив.
-- **Авторство отделено от текста.** Telegram в копипасте подписывает пересланное
-  сообщение тем, кто переслал. На живом чате это затронуло 16 сообщений из 21 —
-  требования заказчика достались бы его руководителю. Поле `attribution` делает
-  такую подмену видимой и запрещает цитировать по ложному автору.
-- **Повторный импорт безопасен.** Выгрузил чат заново — примется только новое,
-  ничего не задвоится.
-- **У каждого материала есть достоверность.** `verbatim`, `reconstructed`,
-  `digest`, `placeholder`. Конспект нельзя процитировать как чьи-то слова —
-  это запрещено стандартом, а не оставлено на внимательность.
-- **Пропуски видны.** Не удалось достать оригинал — заводится запись, а не тишина.
-  «Не добыт» и «утрачен» — разные вещи: первое задача, второе факт.
-- **`INDEX.md` генерируется.** Рукописный индекс молча расходится с содержимым;
-  здесь он производный от манифеста, и разойтись не может.
-- **Изъятия — часть формата.** Что удалено, почему, обратимо ли, где лежит
-  оригинал. Без этого архив нельзя показать.
-- **Данные не уезжают в git.** Каталог экспорта исключается из репозитория
-  хост-проекта до того, как в нём появится первый файл.
+- **RAW is verbatim and immutable.** Every file is recorded with its `sha256`, so
+  a substitution shows.
+- **Who is who.** A people registry ties a messenger display name, a git login
+  and a spoken name together; the `self` role marks whoever keeps the archive.
+- **Attribution is separate from the text.** A Telegram paste signs a forwarded
+  message with whoever forwarded it. On a real chat that affected 16 messages out
+  of 21 — the client's requirements would have been attributed to their manager.
+  The `attribution` field makes such a swap visible and forbids quoting under a
+  false author.
+- **Re-importing is safe.** Dump the chat again and only the new part is taken in;
+  nothing is duplicated.
+- **Every piece of material carries a fidelity level.** `verbatim`,
+  `reconstructed`, `digest`, `placeholder`. A summary cannot be quoted as
+  somebody's words — the standard forbids it, rather than leaving it to care.
+- **Gaps are visible.** When the original cannot be obtained, a record is filed
+  instead of silence. "Not obtained" and "lost" are different things: the first is
+  a task, the second a fact.
+- **`INDEX.md` is generated.** A hand-written index drifts from the content
+  silently; here it is derived from the manifest and cannot drift.
+- **Redactions are part of the format.** What was removed, why, whether it is
+  reversible, where the original lives. Without that the archive cannot be shown.
+- **Data does not leak into git.** The export directory is excluded from the host
+  project's repository before the first file with data appears in it.
 
-## Установка
+## Install
 
 ### Claude Code
 
@@ -86,9 +98,9 @@ claude plugin marketplace add ZenonEl/mnemo
 claude plugin install mnemo@mnemo
 ```
 
-То же из сессии: `/plugin marketplace add ZenonEl/mnemo`, затем
-`/plugin install mnemo@mnemo`. Обновление — `claude plugin update mnemo@mnemo`
-и рестарт.
+The same from a session: `/plugin marketplace add ZenonEl/mnemo`, then
+`/plugin install mnemo@mnemo`. To update — `claude plugin update mnemo@mnemo`
+and restart.
 
 ### Codex
 
@@ -97,146 +109,148 @@ codex plugin marketplace add ZenonEl/mnemo
 codex plugin add mnemo@mnemo
 ```
 
-Обновление — `codex plugin marketplace upgrade`, затем `codex plugin add` заново.
+To update — `codex plugin marketplace upgrade`, then `codex plugin add` again.
 
-Копировать репозиторий в `~/.codex/skills/` не надо: копия — второй экземпляр
-стандарта, расходящийся с оригиналом молча.
+Do not copy the repository into `~/.codex/skills/`: a copy is a second instance
+of the standard, drifting from the original in silence.
 
-**В обоих хостах навыки зовутся одинаково** — `mnemo:chat-export`,
-`mnemo:work-state`, `mnemo:reconcile` — и каждый читается из одного общего файла.
+**In both hosts the skills are named the same** — `mnemo:chat-export`,
+`mnemo:work-state`, `mnemo:reconcile` — and each is read from one shared file.
 
-Зависимостей нет — скрипты работают на голой стандартной библиотеке Python 3.
+No dependencies: the scripts run on the bare Python 3 standard library.
 
-## Как это выглядит
+## What it looks like
 
 ```
 <export>/
-├── INDEX.md                      производный: хронология, участники, хвосты
-├── MANIFEST.json                 источник истины о содержимом
+├── INDEX.md                      derived: chronology, participants, loose ends
+├── MANIFEST.json                 source of truth about the contents
 ├── summaries/
-│   ├── <дата>_chat-summary.md    о чём договорились
-│   ├── attachments-summary.md    что решено в документах, на что сверяться
-│   ├── conventions.md            правила работы + кто и когда их установил
-│   ├── findings-log.md           проверенные факты и куда они донесены
-│   ├── redactions.md             производный: что изъято и почему
-│   └── project-state.md          производный: действующее понимание проекта
+│   ├── <date>_chat-summary.md    what was agreed
+│   ├── attachments-summary.md    what the documents settle, what to check against
+│   ├── conventions.md            working rules + who set them and when
+│   ├── findings-log.md           verified facts and where they were delivered
+│   ├── redactions.md             derived: what was removed and why
+│   └── project-state.md          derived: the standing understanding of the project
 └── raw/
     ├── messages/     YYYY-MM-DD_<author>[_<label>].md
-    ├── attachments/  оригиналы + _extracted-text/
-    ├── screenshots/  оригиналы + from-docx/<doc>/
+    ├── attachments/  originals + _extracted-text/
+    ├── screenshots/  originals + from-docx/<doc>/
     └── voice/
 ```
 
-## Команды
+## Commands
 
-| Команда | Что делает |
+| Command | What it does |
 |---|---|
-| `/mnemo:init` | создать экспорт или **принять существующий** без потери содержимого |
-| `/mnemo:import` | выгрузка Telegram, буфер захвата herald или копипаста: авторство, вложения, дедупликация |
-| `/mnemo:add-text` | сообщение, заметка, транскрипт |
-| `/mnemo:add-files` | документы; из `.docx`/`.xlsx` достаётся текст и вшитые изображения |
-| `/mnemo:add-screens` | скриншоты без пересжатия |
-| `/mnemo:note` | проверенный факт в `findings-log` |
-| `/mnemo:rule` | рабочее правило в `conventions` |
-| `/mnemo:redact` | зарегистрировать изъятие |
-| `/mnemo:remove` | снять запись с учёта, не правя манифест руками |
-| `/mnemo:sync` | пересобрать производные из манифеста |
-| `/mnemo:req` | требование заказчика: дословно, с доказательством |
-| `/mnemo:ask` | открытый вопрос: что блокирует, кому задан |
-| `/mnemo:review` | сверить новый пакет с действующим пониманием проекта |
-| `/mnemo:feedback` | зафиксировать confirmation или clarification для аудитории |
-| `/mnemo:deliver` | отметить фактическую доставку сохранённого feedback |
-| `/mnemo:decide` | решение с причиной и происхождением |
-| `/mnemo:fact` | утверждение как claim либо проверенный факт |
-| `/mnemo:audiences` | кому обязаны синхронизацией и с какой сверки |
-| `/mnemo:audit` | **всё ли сделано, как хотел заказчик** — с доказательствами |
-| `/mnemo:upgrade` | безопасно обновить распознанные legacy-случаи по dry-run и hash |
-| `/mnemo:verify` | линтер: 27 правил стандарта |
-| `/mnemo:gaps` | чего не хватает и что утрачено |
-| `/mnemo:people` | реестр людей: связать имена одного человека из разных источников |
-| `/mnemo:publish` | публичный срез без рабочих данных |
+| `/mnemo:init` | create an export, or **adopt an existing one** without losing content |
+| `/mnemo:import` | a Telegram dump, a herald capture buffer or a paste: authorship, attachments, deduplication |
+| `/mnemo:add-text` | a message, a note, a transcript |
+| `/mnemo:add-files` | documents; text and embedded images are pulled out of `.docx`/`.xlsx` |
+| `/mnemo:add-screens` | screenshots, no re-compression |
+| `/mnemo:note` | a verified fact into `findings-log` |
+| `/mnemo:rule` | a working rule into `conventions` |
+| `/mnemo:redact` | register a redaction |
+| `/mnemo:remove` | retire a record instead of editing the manifest by hand |
+| `/mnemo:sync` | rebuild the derived files from the manifest |
+| `/mnemo:req` | a client requirement: verbatim, with proof |
+| `/mnemo:ask` | an open question: what it blocks, who it is asked of |
+| `/mnemo:review` | reconcile a new batch against the standing understanding |
+| `/mnemo:feedback` | record a confirmation or a clarification for an audience |
+| `/mnemo:deliver` | mark the actual delivery of a stored feedback |
+| `/mnemo:decide` | a decision with its reason and origin |
+| `/mnemo:fact` | a claim, or a verified fact |
+| `/mnemo:audiences` | who is owed synchronisation, and from which review |
+| `/mnemo:audit` | **is everything done the way the client wanted** — with proof |
+| `/mnemo:upgrade` | safely bring recognised legacy cases up to date, by dry-run and hash |
+| `/mnemo:verify` | the linter: 27 rules of the standard |
+| `/mnemo:gaps` | what is missing and what is lost |
+| `/mnemo:people` | the people registry: tie one person's names from different sources |
+| `/mnemo:publish` | a public slice with no work data in it |
 
-Под Codex команд с таким именем нет — навык выполняет ту же операцию скриптом из
-`scripts/`. Список выше читается как перечень возможностей, а не как синтаксис
-одного хоста. `mnemo:reconcile` разрешён для implicit invocation: Codex и
-Claude Code могут сами выбрать его по новому пакету или пересланному потоку
-решений, без явного `$mnemo:reconcile`.
+Under Codex there are no commands by these names — the skill performs the same
+operation with a script from `scripts/`. Read the list above as a set of
+capabilities, not as one host's syntax. `mnemo:reconcile` is allowed for
+implicit invocation: both Codex and Claude Code may pick it themselves on a new
+batch or a forwarded stream of decisions, without an explicit
+`$mnemo:reconcile`.
 
-## Навыки
+## Skills
 
-Команды набирает человек. Навык модель поднимает сама — по тому, о чём идёт
-разговор. Их три, и делят они работу по намерению:
+Commands are typed by a person. A skill the model raises itself — from what the
+conversation is about. There are three, and they divide the work by intent:
 
-| Навык | Когда поднимается |
+| Skill | When it is raised |
 |---|---|
-| `mnemo:chat-export` | приём материала: сохранить переписку, разобрать вложения, принять существующий экспорт |
-| `mnemo:work-state` | состояние работы: что от нас хотят, всё ли сделано, что блокирует, что спросить |
-| `mnemo:reconcile` | новый пакет: что изменилось и как коротко синхронизировать руководство |
+| `mnemo:chat-export` | taking material in: save a conversation, break down attachments, adopt an existing export |
+| `mnemo:work-state` | the state of the work: what is wanted of us, is it all done, what blocks, what to ask |
+| `mnemo:reconcile` | a new batch: what changed, and how to synchronise a manager briefly |
 
-Разделены они не для красоты. Пока описание было одно, все его триггеры были про
-приём материала — проверяющая половина не поднималась вовсе, а под Codex, где
-слэш-команд нет, её и вызвать было нечем.
+They are not split for elegance. While there was a single description, all of its
+triggers were about taking material in — the checking half was never raised at
+all, and under Codex, where there are no slash commands, there was nothing to
+call it with.
 
-## Стандарт
+## The standard
 
-- [`SPEC/STANDARD.md`](SPEC/STANDARD.md) — раскладка, контракт `item`, правила; **версия объявлена там**
-- [`SPEC/PROVENANCE.md`](SPEC/PROVENANCE.md) — модель достоверности и правила цитирования
-- [`SPEC/CITATION.md`](SPEC/CITATION.md) — формат ссылок `ctx:<slug>#<id>`
-- [`SPEC/QUERY.md`](SPEC/QUERY.md) — контракт чтения: как берут данные сторонние инструменты
-- [`SPEC/CHANGELOG.md`](SPEC/CHANGELOG.md) — версии
+- [`SPEC/STANDARD.md`](SPEC/STANDARD.md) — layout, the `item` contract, the rules; **the version is declared there**
+- [`SPEC/PROVENANCE.md`](SPEC/PROVENANCE.md) — the fidelity model and the rules of quoting
+- [`SPEC/CITATION.md`](SPEC/CITATION.md) — the `ctx:<slug>#<id>` reference format
+- [`SPEC/QUERY.md`](SPEC/QUERY.md) — the read contract: how outside tools take the data
+- [`SPEC/CHANGELOG.md`](SPEC/CHANGELOG.md) — versions
 
-Стандарт — источник истины. Навыки, команды и скрипты — его потребители; расхождение
-между ними и текстом стандарта считается дефектом инструмента.
+The standard is the source of truth. Skills, commands and scripts are its
+consumers; a divergence between them and the text of the standard counts as a
+defect of the tool.
 
-## Проверено на
+## Tried on
 
-Три реальных экспорта, сделанных руками до появления стандарта, — приняты без потери
-содержимого, линтер проходит на всех: рабочая переписка с приёмкой проекта (документы
-с вшитыми скринами), доска задач из группового чата, и реконструкция удалённой
-переписки из логов сессий с четырьмя уровнями достоверности в одном файле.
+Three real exports, made by hand before the standard existed, were adopted
+without losing content, and the linter passes on all of them: a working
+conversation with a project handover (documents with embedded screenshots), a
+task board out of a group chat, and a reconstruction of a deleted conversation
+from session logs, with four fidelity levels inside one file.
 
-Приёмка нашла в стандарте два пробела, которых проектирование не заметило, — оба
-закрыты и описаны в [`SPEC/CHANGELOG.md`](SPEC/CHANGELOG.md).
+Adoption found two gaps in the standard that design had missed — both closed and
+described in [`SPEC/CHANGELOG.md`](SPEC/CHANGELOG.md).
 
-## Связка
+## The set
 
-mnemo — один из трёх инструментов вокруг рабочего контекста. Разделяются
-**три опубликованных формата**: ссылка `ctx:<slug>#<id>`, сам манифест и
-[контракт чтения](SPEC/QUERY.md) — все описаны в [`SPEC/`](SPEC/CITATION.md) и
-версионированы. Ничего исполняемого не разделяется: ни библиотеки, ни процесса,
-ни базы. Потребитель вызывает команду и получает JSON — так же, как вызвал бы
-`gh`; зависимость идёт на опубликованный формат вывода, и mnemo о потребителе
-не знает.
+mnemo is one of three tools around work context. **Three published formats** are
+shared: the `ctx:<slug>#<id>` reference, the manifest itself, and the
+[read contract](SPEC/QUERY.md) — all described under [`SPEC/`](SPEC/CITATION.md)
+and versioned. Nothing executable is shared: no library, no process, no
+database. A consumer calls a command and gets JSON, the same way it would call
+`gh`; the dependency is on a published output format, and mnemo knows nothing
+about the consumer.
 
-| Проект | Роль |
+| Project | Role |
 |---|---|
-| **mnemo** | архив материала с провенансом; факты, решения, вопросы |
-| `ephemeris` | дейлики: состояние дня и синк в GitHub issues |
-| `herald` | канал наружу и захват рабочих чатов в буфер, откуда их берёт импорт |
+| **mnemo** | the archive of material with provenance; facts, decisions, questions |
+| `ephemeris` | dailies: the state of the day, synced into GitHub issues |
+| `herald` | the channel out, and capture of work chats into a buffer the import reads |
 
-## Дальше
+## Next
 
-[`BACKLOG.md`](BACKLOG.md) — векторный поиск, MCP-сервер, расшифровка голосовых,
-парсер Telegram Desktop, автоматическая деперсонализация. Всё это ложится поверх
-стандарта и не требует его переписывания.
+Search over the archive, an MCP server, voice transcription, a Telegram Desktop
+dump parser, automatic depersonalisation. All of it sits on top of the standard
+and requires no rewrite of it.
 
-Общая картина, частью которой это является, — [`docs/VISION.md`](docs/VISION.md).
+## How this project is worked on
 
-## Правила работы над проектом
+[`CONTRIBUTING.md`](CONTRIBUTING.md) — including the main rule: **examples are
+depersonalised, always.** Real names of projects, people and organisations do
+not enter the repository in any form.
 
-[`CONTRIBUTING.md`](CONTRIBUTING.md) — в том числе главное: **примеры только
-обезличенные.** Настоящие имена проектов, людей и организаций в репозиторий не
-попадают ни в каком виде.
+## Licences
 
-## Лицензии
+The repository is licensed in parts:
 
-Репозиторий лицензирован по частям:
-
-| Путь | Лицензия |
+| Path | Licence |
 |---|---|
-| `SPEC/` — текст стандарта | [CC BY-SA 4.0](SPEC/LICENSE) |
-| всё остальное — навыки, команды, скрипты | [AGPL-3.0-or-later](LICENSE) |
+| `SPEC/` — the text of the standard | [CC BY-SA 4.0](SPEC/LICENSE) |
+| everything else — skills, commands, scripts | [AGPL-3.0-or-later](LICENSE) |
 
-Стандарт — текст, и вирусность нужна на его производные редакции. Код — под AGPL,
-потому что осмысленный сценарий развития (MCP-сервер поверх архива) иначе позволял бы
-поднять его как закрытый сервис.
+The standard is text, and the copyleft is needed on its derivative editions. The
+code is under AGPL because the sensible way this develops — an MCP server over
+the archive — would otherwise let someone raise it as a closed service.
