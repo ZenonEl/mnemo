@@ -535,10 +535,14 @@ def check(export: Path) -> Report:
             validate_feedback_contract(manifest, review)
         except MnemoError as exc:
             report.error("V24", str(exc), rid)
+        # Причина «синхронизация никому не нужна» — зафиксированное суждение
+        # момента, когда аудиторий не было. Появившаяся позже аудитория его не
+        # опровергает: она лишь начинает считать сверку pending со своего
+        # baseline. Поэтому глобального списка аудиторий здесь нет — иначе одна
+        # команда `audiences --add` объявляла бы нарушением всё прошлое.
         no_audience_reason = review.get("audience_not_needed_reason")
-        if no_audience_reason and (
-                audience_names or not review_material(manifest, review)
-                or is_vague(no_audience_reason)):
+        if no_audience_reason and (not review_material(manifest, review)
+                                   or is_vague(no_audience_reason)):
             report.error("V24", "неприменимый audience_not_needed_reason", rid)
 
     # V27 — upgrade является единственным контролируемым исключением из

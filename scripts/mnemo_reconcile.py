@@ -504,6 +504,8 @@ def apply_review_plan(manifest: dict, plan: dict) -> dict:
     for change in changes:
         validate_review_change(staged, change)
     material = review_material(staged, review)
+    # Здесь глобальный список честен: baseline аудитории не может оказаться
+    # выше создаваемой сверки, поэтому применимость совпадает с наличием.
     audiences = staged.get("export", {}).get("audiences", [])
     no_audience_reason = review.get("audience_not_needed_reason")
     if material and not audiences and is_vague(no_audience_reason):

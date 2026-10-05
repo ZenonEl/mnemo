@@ -433,3 +433,108 @@ class HeraldHandshake(ReconcileCase):
         checked = run("mnemo_verify.py", "--export", str(self.export))
         self.assertEqual(checked.returncode, 1)
         self.assertIn("V18", checked.stdout)
+
+
+class AudienceBaselineAndRemoval(ReconcileCase):
+    """Аудитория заводится позже сверок и не должна отменять их прошлое."""
+
+    def _requirement(self, item_id: str, quote: str) -> dict:
+        return {
+            "kind": "requirement", "source_items": [item_id],
+            "record": {
+                "quote": quote, "wanted_by": "petr-ivanov",
+                "based_on": [f"ctx:priyomka#{item_id}"], "state": "stated",
+            },
+        }
+
+    def _material_review_with_waiver(self, label: str, quote: str) -> str:
+        item_id, package_id = self.add_text(label, quote)
+        done = self.apply_plan(self.plan(
+            scope=[package_id], creates=[self._requirement(item_id, quote)],
+        ))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        review = self.manifest()["reviews"][-1]
+        self.assertTrue(review["audience_not_needed_reason"])
+        return review["id"]
+
+    def test_first_audience_does_not_turn_a_green_archive_red(self) -> None:
+        first = self._material_review_with_waiver("one", "Нужен отчёт по складу")
+        second = self._material_review_with_waiver("two", "Нужен экспорт прайса")
+        self.assertEqual(run("mnemo_verify.py", "--export", str(self.export)).returncode, 0)
+
+        added = self.man("audiences", "--add", "--name", "руководство",
+                         "--kind", "business", "--people", "petr-ivanov",
+                         "--backfill-from", second)
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertIn("станут pending", added.stdout)
+
+        after = run("mnemo_verify.py", "--export", str(self.export))
+        self.assertEqual(after.returncode, 0, after.stdout + after.stderr)
+        self.assertNotIn("audience_not_needed_reason", after.stdout)
+
+        data = json.loads(run("mnemo_audit.py", "--export", str(self.export),
+                              "--json").stdout)
+        states = {r["id"]: r["audiences"]["руководство"]["status"] for r in data["reviews"]}
+        self.assertEqual(states[first], "out_of_scope")
+        self.assertEqual(states[second], "pending")
+        self.assertEqual(data["sync"]["pending_for"]["руководство"], [second])
+
+    def test_audience_is_removable_until_a_feedback_points_at_it(self) -> None:
+        review_id = self._material_review_with_waiver("one", "Нужен отчёт по складу")
+        self.add_audience()
+        removed = self.man("audiences", "--remove", "--name", "руководство")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(self.manifest()["export"]["audiences"], [])
+
+        self.add_audience()
+        text = self.tmp / "brief.txt"
+        text.write_text("Поняли так, берём в работу.\n", encoding="utf-8")
+        record = self.manifest()["requirements"][-1]["id"]
+        written = self.man("feedback", review_id, "--audience", "руководство",
+                           "--needed", "--form", "confirmation",
+                           "--text-file", str(text), "--includes-records", record)
+        self.assertEqual(written.returncode, 0, written.stderr)
+
+        refused = self.man("audiences", "--remove", "--name", "руководство")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn(review_id, refused.stderr)
+        self.assertEqual(len(self.manifest()["export"]["audiences"]), 1)
+
+    def test_reason_on_a_nonmaterial_review_stays_an_error(self) -> None:
+        """Причина осмысленна только там, где есть что синхронизировать.
+
+        Писатель такую запись не производит — заслон отказывает. Приходит она
+        из правки манифеста руками, ровно того случая, ради которого V24 и
+        живёт; условие проверяется тем же `if`, что и применимость причины.
+        """
+        item_id, package_id = self.add_text("noise", "Созвон переносим на четверг")
+        done = self.apply_plan(self.plan(
+            scope=[package_id], audience_waiver=False,
+            nonmaterial=[{"items": [item_id], "reason": "перенос созвона, записей не даёт"}],
+        ))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(run("mnemo_verify.py", "--export", str(self.export)).returncode, 0)
+
+        path = self.export / "MANIFEST.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["reviews"][-1]["audience_not_needed_reason"] = (
+            "синхронизация никому не нужна, решение внутреннее"
+        )
+        manifest["mnemo_spec"] = "1.19"
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        after = run("mnemo_verify.py", "--export", str(self.export))
+        self.assertEqual(after.returncode, 1)
+        self.assertIn("неприменимый audience_not_needed_reason", after.stdout)
+
+    def test_baseline_moves_only_to_a_known_review(self) -> None:
+        review_id = self._material_review_with_waiver("one", "Нужен отчёт по складу")
+        self.add_audience()
+        moved = self.man("audiences", "--set-since", review_id, "--name", "руководство")
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertEqual(self.manifest()["export"]["audiences"][0]["since_s"], review_id)
+        self.assertIn("станут pending", moved.stdout)
+
+        refused = self.man("audiences", "--set-since", "s099", "--name", "руководство")
+        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(self.manifest()["export"]["audiences"][0]["since_s"], review_id)

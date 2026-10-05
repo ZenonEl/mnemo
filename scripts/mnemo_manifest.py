@@ -46,7 +46,7 @@ from mnemo_core import (  # noqa: E402
 from mnemo_reconcile import (  # noqa: E402
     add_feedback, append_package, apply_review_plan, csv_values,
     deliver_feedback, file_sha256, find_review, guard_packaged_lifecycle,
-    new_decision, new_fact, next_review_id, review_material,
+    new_decision, new_fact, next_review_id, review_material, review_number,
     suggested_feedback_form, validate_graph,
 )
 from mnemo_upgrade import apply_upgrade, build_upgrade_plan  # noqa: E402
@@ -1588,11 +1588,82 @@ def cmd_fact(args) -> int:
     return _record_command(args, "fact")
 
 
+def _audience_mentions(manifest: dict, name: str) -> list[str]:
+    """Сверки, в которых у этой аудитории есть зафиксированная отписка."""
+    return [review.get("id") for review in manifest.get("reviews", [])
+            if any(f.get("audience") == name for f in review.get("feedback") or [])]
+
+
+def _audiences_change(export: Path, manifest: dict, audiences: list, args) -> int:
+    """Снять ошибочно заведённую аудиторию или перенести её baseline.
+
+    Аудитория — настройка, а не понимание: её правка не переписывает ни одной
+    записи о проекте. Но отписка и доставка — записи, и снятие аудитории,
+    на которую они ссылаются, оставило бы их висеть ни на чём. Поэтому такое
+    снятие отвергается и называет, что мешает.
+    """
+    name = str(args.name or "").strip()
+    if not name:
+        raise MnemoError("--remove и --set-since требуют --name")
+    audience = next((a for a in audiences if a.get("name") == name), None)
+    if audience is None:
+        known = ", ".join(a.get("name", "?") for a in audiences) or "список пуст"
+        raise MnemoError(f"нет аудитории «{name}»; есть: {known}")
+    if args.remove:
+        mentions = _audience_mentions(manifest, name)
+        if mentions:
+            raise MnemoError(
+                f"у аудитории «{name}» есть отписки в сверках: {', '.join(mentions)}. "
+                "Снятие оставило бы их без адресата; сначала разберись с ними"
+            )
+        with export_lock(export):
+            manifest = load_manifest(export)
+            live = manifest.setdefault("export", {}).setdefault("audiences", [])
+            manifest["export"]["audiences"] = [a for a in live if a.get("name") != name]
+            save_manifest(export, manifest)
+        print(f"аудитория «{name}» снята")
+        return 0
+    target = args.set_since
+    if not re.fullmatch(r"s\d{3,}", target):
+        raise MnemoError("--set-since должен иметь вид sNNN")
+    reviews = manifest.get("reviews", [])
+    if not any(r.get("id") == target for r in reviews) and target != next_review_id(manifest):
+        raise MnemoError(f"нет сверки {target} и это не следующая сверка")
+    with export_lock(export):
+        manifest = load_manifest(export)
+        live = next(a for a in manifest["export"]["audiences"] if a.get("name") == name)
+        was, live["since_s"] = live.get("since_s"), target
+        save_manifest(export, manifest)
+    print(f"аудитория «{name}»: baseline {was} → {target}")
+    _report_pending_shift(manifest, name, target)
+    return 0
+
+
+def _report_pending_shift(manifest: dict, name: str, baseline: str) -> None:
+    """Сказать вслух, сколько прошлых сверок эта граница делает pending.
+
+    Аудитория не портит архив — линтер на прошлом не падает. Но она меняет
+    список долгов, и человек должен увидеть это сразу, а не в следующем audit.
+    """
+    floor = review_number(baseline, 1)
+    waiting = [r.get("id") for r in manifest.get("reviews", [])
+               if review_number(r.get("id")) >= floor and review_material(manifest, r)
+               and not any(f.get("audience") == name and f.get("deliveries")
+                           for f in r.get("feedback") or [])]
+    if waiting:
+        print(f"  станут pending для «{name}»: {len(waiting)} сверок, "
+              f"старшая {waiting[0]}")
+    else:
+        print(f"  pending для «{name}» нет")
+
+
 def cmd_audiences(args) -> int:
     """Настроить, кому проект обязан понятной синхронизацией."""
     export = find_export(Path(args.export))
     manifest = load_manifest(export)
     audiences = manifest.setdefault("export", {}).setdefault("audiences", [])
+    if args.remove or args.set_since:
+        return _audiences_change(export, manifest, audiences, args)
     if not args.add:
         if not audiences:
             print("аудиторий нет")
@@ -1650,6 +1721,7 @@ def cmd_audiences(args) -> int:
     audiences.append(audience)
     save_manifest(export, manifest)
     print(f"{audience['name']}  с {audience['since_s']}  {', '.join(people)}")
+    _report_pending_shift(manifest, audience["name"], audience["since_s"])
     return 0
 
 
@@ -2025,6 +2097,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_aud.add_argument("--backfill-from", default=None, metavar="S_ID")
     p_aud.add_argument("--confirm-create-people", action="store_true",
                        help="явно добавить неизвестные имена как management")
+    p_aud.add_argument("--remove", action="store_true",
+                       help="снять аудиторию, у которой нет отписок")
+    p_aud.add_argument("--set-since", default=None, metavar="S_ID",
+                       help="перенести baseline аудитории на другую сверку")
     p_aud.set_defaults(func=cmd_audiences)
 
     p_review = sub.add_parser(

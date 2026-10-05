@@ -545,7 +545,7 @@ class ReadContract(ExportCase):
     def test_the_standard_version_agrees_with_the_document(self) -> None:
         header = (ROOT / "SPEC" / "STANDARD.md").read_text(encoding="utf-8")
         self.assertIn(f"**Версия стандарта:** {SPEC_VERSION}", header)
-        self.assertEqual(SPEC_VERSION, "1.18")
+        self.assertEqual(SPEC_VERSION, "1.19")
 
 
 class SpecVersionIsRaised(ExportCase):
