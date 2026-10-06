@@ -288,10 +288,24 @@ class FrozenReview(ReconcileCase):
         self.assertIn("одновременно", done.stderr)
 
     def test_retired_item_is_skipped_by_review_and_verifier(self) -> None:
+        """Снятый материал не требует покрытия и не ломает линтер.
+
+        Файл доводится до отсутствия руками, а не полагается на корзину:
+        `remove` убирает его через внешний `trash-put`, которого на чистой
+        машине нет — тогда он честно говорит «оставлен на месте, убери
+        вручную». Тест про покрытие, а не про корзину, и зависеть от набора
+        установленных утилит он не должен: с 07.09 по 05.10 он проходил
+        локально и падал в CI каждым прогоном именно из-за этого.
+        """
         item_id, package_id = self.add_text("retired")
+        raw_path = self.export / self.manifest()["items"][-1]["raw_path"]
         removed = self.man("remove", "--id", item_id, "--reason", "дубликат материала",
                            "--confirm")
         self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertNotIn(item_id, [i["id"] for i in self.manifest()["items"]])
+        if raw_path.exists():
+            self.assertIn("убери вручную", removed.stdout)
+            raw_path.unlink()
         done = self.apply_plan(self.plan(scope=[package_id], audience_waiver=False))
         self.assertEqual(done.returncode, 0, done.stderr)
         checked = run("mnemo_verify.py", "--export", str(self.export))
